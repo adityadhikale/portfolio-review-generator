@@ -1,0 +1,47 @@
+{
+  "_comment": "DRAFT deterministic Rating / Sentiment rules, applied only to stocks whose Universal Sheet Rating / Sentiment cell is blank, and only when approved = true. A value typed in the Universal Sheet always wins. Inputs are parsed from the Result Line: revenue YoY % ('Rev +12.3% YoY'), PAT YoY % ('PAT -18.5% YoY'), a turnaround ('PAT Rs 71cr vs loss ...') or a loss ('Net loss ...'). Rules are checked top to bottom; the first match wins. Thresholds are in percent.",
+  "approved": true,
+  "rules": [
+    {
+      "rating": "Weak",
+      "when": "loss",
+      "note": "net loss in the quarter"
+    },
+    {
+      "rating": "Weak",
+      "when": "pat_yoy <= -25",
+      "note": "PAT down 25% or more"
+    },
+    {
+      "rating": "Excellent",
+      "when": "turnaround and rev_yoy >= 15",
+      "note": "swung to profit with revenue up 15%+"
+    },
+    {
+      "rating": "Good",
+      "when": "turnaround",
+      "note": "swung to profit"
+    },
+    {
+      "rating": "Average",
+      "when": "pat_yoy < 10",
+      "note": "PAT growth below 10% (incl. -25% to +10%)"
+    },
+    {
+      "rating": "Excellent",
+      "when": "pat_yoy >= 25 and rev_yoy >= 15",
+      "note": "PAT up 25%+ and revenue up 15%+"
+    },
+    {
+      "rating": "Good",
+      "when": "pat_yoy >= 10",
+      "note": "PAT up 10%+"
+    }
+  ],
+  "sentiment_from_rating": {
+    "Excellent": "Bullish",
+    "Good": "Bullish",
+    "Average": "Neutral",
+    "Weak": "Bearish"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "price_source": "universal_cmp",
+  "_price_source_options": "universal_cmp (CMP column of the Universal Sheet) | broker_ltp (LTP column of the broker file)",
+  "narrative_provider": "manual",
+  "_narrative_provider_options": "manual (read narrative.json you paste in). Other providers can be registered in crest/narrative.py; no network calls are made by 'manual'.",
+  "narrative_number_check": "warn",
+  "narrative_allowed_numbers": [],
+  "sector_check": "warn",
+  "unmatched_policy": "warn",
+  "allocation_tolerance_pct": 0.01,
+  "tieout_extra_tolerance_inr": 1.0,
+  "deck": {
+    "max_rows_single_slide": 8,
+    "max_rows_when_split": 6,
+    "table_top_in": 1.2,
+    "table_bottom_limit_in": 6.85,
+    "header_row_in": 0.3,
+    "max_row_in": 0.72,
+    "tail_weight_threshold_pct": 1.0,
+    "top_n": 5,
+    "template_period_literals": [
+      "Q1 FY27",
+      "Q1FY27"
+    ],
+    "pending_marker": "PENDING NARRATIVE"
+  },
+  "libreoffice_path": "",
+  "render_png_dpi": 80
+}

@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# CLIENT DATA AND CREST RESEARCH - never commit (see README: "Private files")
+# ---------------------------------------------------------------------------
+# Client holdings dropped in for a run (keep the folder and its note)
+input/*
+!input/README.txt
+
+# Generated results and run archives
+output/*
+!output/README.txt
+runs/
+
+# Private sample files (real client statement, finished client deck)
+samples/
+
+# Live Universal Sheet (CREST research and views) and the branded deck template
+templates/universal-sheet.xlsx
+templates/Deck_-_template.pptx
+
+# Test fixtures generated from the private samples (tools/build_fixture.py, tools/extract_narrative.py)
+tests/fixtures/universal_sample.xlsx
+tests/fixtures/narrative_maneesh.json
+
+# Any stray spreadsheet / deck / PDF elsewhere is assumed private
+*.xlsx
+*.xlsm
+*.csv
+*.pptx
+*.pdf
+!templates/Universal_Sheet_template.xlsx
+
+# ---------------------------------------------------------------------------
+# Python / tooling
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+.idea/
+.vscode/
+
+# Office / OS temp files
+~$*
+.~lock.*#
+Thumbs.db
+Desktop.ini
+.DS_Store

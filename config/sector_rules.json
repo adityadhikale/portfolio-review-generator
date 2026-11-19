@@ -1,0 +1,224 @@
+{
+  "_comment": "Sector sanity check. If a stock's NAME contains a keyword (case-insensitive, whole word), its Sector must be one of 'allowed'; otherwise it is flagged. Only flags, never changes data.",
+  "rules": [
+    {
+      "keywords": [
+        "bank"
+      ],
+      "allowed": [
+        "Banking",
+        "Financial Services",
+        "Other Bank",
+        "Private Sector Bank",
+        "Public Sector Bank"
+      ]
+    },
+    {
+      "keywords": [
+        "pharma",
+        "pharmaceuticals",
+        "pharmalabs",
+        "drugs",
+        "laboratories",
+        "labs",
+        "medicare",
+        "biotech",
+        "lifesciences"
+      ],
+      "allowed": [
+        "Healthcare",
+        "Healthcare Service Provider",
+        "Hospital",
+        "Pharmaceuticals"
+      ]
+    },
+    {
+      "keywords": [
+        "hospital",
+        "hospitals",
+        "hrudayalaya",
+        "diagnostics",
+        "thyrocare"
+      ],
+      "allowed": [
+        "Healthcare",
+        "Healthcare Service Provider",
+        "Hospital"
+      ]
+    },
+    {
+      "keywords": [
+        "chini",
+        "sugar",
+        "sugars"
+      ],
+      "allowed": [
+        "Agri & Sugar",
+        "FMCG",
+        "Food Products",
+        "Sugar"
+      ]
+    },
+    {
+      "keywords": [
+        "jewellery",
+        "jewellers",
+        "jewels",
+        "gold"
+      ],
+      "allowed": [
+        "Consumer Durables",
+        "Consumer Services",
+        "Gems, Jewellery And Watches",
+        "Retailing"
+      ]
+    },
+    {
+      "keywords": [
+        "finance",
+        "financial",
+        "capital",
+        "wealth",
+        "exchange",
+        "finserv"
+      ],
+      "allowed": [
+        "Banking",
+        "Capital Markets",
+        "Exchange and Data Platform",
+        "Financial Services",
+        "Holding Company",
+        "Housing Finance Company",
+        "Insurance",
+        "Investment Company",
+        "Microfinance Institutions",
+        "NBFC",
+        "Non Banking Financial Company (NBFC)",
+        "Other Bank",
+        "Other Financial Services",
+        "Private Sector Bank",
+        "Stockbroking & Allied"
+      ]
+    },
+    {
+      "keywords": [
+        "retail"
+      ],
+      "allowed": [
+        "Consumer Services",
+        "Diversified Retail",
+        "Retailing",
+        "Speciality Retail"
+      ]
+    },
+    {
+      "keywords": [
+        "oil",
+        "gas",
+        "petroleum"
+      ],
+      "allowed": [
+        "Energy",
+        "LPG/CNG/PNG/LNG Supplier",
+        "Oil & Gas",
+        "Oil Exploration & Production",
+        "Power & Utilities",
+        "Utilities"
+      ]
+    },
+    {
+      "keywords": [
+        "projects",
+        "infra",
+        "infrastructure",
+        "construction",
+        "engineering"
+      ],
+      "allowed": [
+        "Capital Goods",
+        "Civil Construction",
+        "Construction",
+        "Engineering Services",
+        "Heavy Electrical Equipment",
+        "Industrial Products",
+        "Other Industrial Products",
+        "Power & Utilities",
+        "Power - Transmission",
+        "Realty",
+        "Residential, Commercial Projects"
+      ]
+    },
+    {
+      "keywords": [
+        "pigments",
+        "chemicals",
+        "chemical",
+        "fluorine",
+        "speciality"
+      ],
+      "allowed": [
+        "Chemicals",
+        "Commodity Chemicals",
+        "Dyes And Pigments",
+        "Specialty Chemicals"
+      ]
+    },
+    {
+      "keywords": [
+        "technologies",
+        "technology",
+        "microsystems",
+        "systems",
+        "software",
+        "infotech"
+      ],
+      "allowed": [
+        "Aerospace & Defense",
+        "Capital Goods",
+        "Computers - Software & Consulting",
+        "Engineering Services",
+        "Healthcare Service Provider",
+        "Heavy Electrical Equipment",
+        "IT Hardware & Distribution",
+        "IT Services",
+        "Industrial Products",
+        "Other Industrial Products",
+        "Plastic Products - Industrial",
+        "Transport Related Services"
+      ]
+    },
+    {
+      "keywords": [
+        "aviation",
+        "airlines"
+      ],
+      "allowed": [
+        "Airline",
+        "Aviation"
+      ]
+    },
+    {
+      "keywords": [
+        "bearings",
+        "forgings",
+        "automotive",
+        "motors"
+      ],
+      "allowed": [
+        "Auto Ancillaries",
+        "Auto Components & Equipments",
+        "Automobiles",
+        "Industrial Products"
+      ]
+    },
+    {
+      "keywords": [
+        "etf",
+        "bees"
+      ],
+      "allowed": [
+        "ETF"
+      ]
+    }
+  ]
+}

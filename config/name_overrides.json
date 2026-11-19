@@ -1,0 +1,4 @@
+{
+  "_comment": "Optional display-name overrides keyed by normalised symbol. Used only when the Universal Sheet has no 'Short Name'. Example: \"HBLENGINE\": \"HBL Engineering\"",
+  "overrides": {}
+}
