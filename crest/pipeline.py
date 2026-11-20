@@ -16,7 +16,7 @@ from .ai_review import request_review
 from .brokers import parse_holdings
 from .deck_fill import fill_deck
 from .excel_build import build_workbook
-from .gemini import GeminiClient, resolve_ai
+from .narrative_api import GeminiClient, resolve_ai
 from .match import match_holdings
 from .narrative import SCHEMA, ManualProvider, blank_template, check_numbers, resolve_provider_name, style_issues
 from .office import find_soffice, recalculate_copy

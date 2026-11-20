@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 from .ai_ratings import parse_ratings
-from .gemini import GeminiClient
+from .narrative_api import GeminiClient
 from .narrative import blank_template
 from .universal import RATINGS, SENTIMENTS
 

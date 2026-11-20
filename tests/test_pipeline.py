@@ -188,7 +188,7 @@ class GeminiSingleRequest(unittest.TestCase):
 
     @staticmethod
     def _client(replies):
-        from crest.gemini import GeminiClient
+        from crest.narrative_api import GeminiClient
         sent = []
 
         def post(url, body):
@@ -213,7 +213,7 @@ class GeminiSingleRequest(unittest.TestCase):
         self.assertIn("gemini-pro-latest", sent[0][0])   # first model of the built-in list
 
     def test_switches_model_when_busy(self):
-        from crest.gemini import GeminiClient, ModelUnavailable
+        from crest.narrative_api import GeminiClient, ModelUnavailable
         urls, waits = [], []
 
         def post(url, body):
@@ -229,7 +229,7 @@ class GeminiSingleRequest(unittest.TestCase):
         self.assertEqual(len(gc.tried), 2)
 
     def test_all_models_busy_two_passes_then_stop(self):
-        from crest.gemini import GeminiClient, ModelUnavailable
+        from crest.narrative_api import GeminiClient, ModelUnavailable
         urls, waits = [], []
 
         def post(url, body):
@@ -242,7 +242,7 @@ class GeminiSingleRequest(unittest.TestCase):
         self.assertEqual(waits, [30])
 
     def test_reply_parsing_and_repair(self):
-        from crest.gemini import parse_json_object as p
+        from crest.narrative_api import parse_json_object as p
         self.assertEqual(p('```json\n{"a": 1}\n```'), {"a": 1})
         self.assertEqual(p('Here you go: {"a": 1} hope it helps'), {"a": 1})
         self.assertEqual(p('{"a": {"b": [1, "x}"'), {"a": {"b": [1, "x}"]}})   # missing closers added
@@ -251,7 +251,7 @@ class GeminiSingleRequest(unittest.TestCase):
                 p(bad)
 
     def test_unusable_reply_switches_model(self):
-        from crest.gemini import GeminiClient
+        from crest.narrative_api import GeminiClient
         urls = []
 
         def post(url, body):
@@ -264,7 +264,7 @@ class GeminiSingleRequest(unittest.TestCase):
         self.assertEqual(gc.last_bad_reply, "not json")
 
     def test_fatal_error_does_not_switch(self):
-        from crest.gemini import GeminiClient
+        from crest.narrative_api import GeminiClient
         urls = []
 
         def post(url, body):
@@ -345,7 +345,7 @@ class SheetWriteBack(unittest.TestCase):
 @needs_samples
 class GeminiOutage(unittest.TestCase):
     def test_deck_built_when_gemini_fails(self):
-        from crest import gemini
+        from crest import narrative_api as gemini
         env = {"NARRATIVE_PROVIDER": "gemini", "NARRATIVE_API_KEY": "fake"}
         calls = []
 

@@ -7,8 +7,9 @@ Turns a client's broker holdings file into two deliverables:
 * **`<Client>_CREST_Portfolio_<Period>_Review.pptx`** (plus a PDF): the CREST quarterly review deck, built from the CREST
   template.
 
-Numbers and structure come from plain, deterministic Python. No AI is called and nothing is sent over the network.
-The written commentary slides are filled from a `narrative.json` that you supply (see [Narrative](#narrative-slides)).
+Numbers and structure come from plain, deterministic Python. The written commentary slides are filled from a
+`narrative.json`, which you supply or which the optional narrative API (set up in `.env`) writes; that API is the
+only network call (see [Narrative](#narrative-slides)).
 
 ---
 
@@ -65,7 +66,7 @@ Client data and CREST research never go to GitHub; `.gitignore` excludes them. A
 | File | Purpose |
 |---|---|
 | `templates/universal-sheet.xlsx` | The live Universal Sheet (all stocks, results, views); backups the tool makes before writing to it go to `templates/backups/` |
-| `.env` | Gemini API key and models (copy `.env.example`) |
+| `.env` | narrative API key and models (copy `.env.example`) |
 | `templates/Deck_-_template.pptx` | The CREST deck template |
 | `input/*` | Client holdings files |
 | `samples/holdings.xlsx`, `samples/reference_portfolio.xlsx`, `samples/reference_deck_Q1FY27.pptx` | Reference files, only needed for the end-to-end tests |
@@ -86,10 +87,10 @@ crest/                     the pipeline
   office.py                LibreOffice: recalculation and PDF conversion
   validate.py              validation gate
   ratings.py               draft Rating / Sentiment rules
-  gemini.py                Gemini client (model list, switching on busy / bad replies)
-  ai_review.py             the single Gemini request per client: ratings + narrative
-  ai_ratings.py            per-quarter backup of Gemini ratings (runs/<period>/ai_ratings.json)
-  sheet_writeback.py       writes Gemini ratings into the Universal Sheet without touching other cells
+  narrative_api.py         narrative API client (model list, switching on busy / bad replies)
+  ai_review.py             the single API request per client: ratings + narrative
+  ai_ratings.py            per-quarter backup of API ratings (runs/<period>/ai_ratings.json)
+  sheet_writeback.py       writes API ratings into the Universal Sheet without touching other cells
   deck_data.py             numbers for the deck, read back from the Excel
   narrative.py             narrative template, saved narrative.json, number and style checks
   deck_fill.py             fills the PowerPoint template
@@ -166,15 +167,15 @@ Blank layout with a column guide: `templates/Universal_Sheet_template.xlsx` (Leg
 | Symbol, Alt Symbols, ISIN | optional | used for matching broker files |
 | Q Result Period | optional | e.g. `Q2 FY27`; sets the run period, and a mismatch stops the run |
 | Short Name, Deck Group, Exchange, Instrument Type | optional | display name, group override, ETF flag (`Sector = ETF` also works) |
-| Rating Source, Rating Reason | written by the tool | added when Gemini fills a blank Rating / Sentiment (`AI · model · period · code`); leave blank for ratings you type |
+| Rating Source, Rating Reason | written by the tool | added when the narrative API fills a blank Rating / Sentiment (source, period and a change code); leave blank for ratings you type |
 
 Formula cells (e.g. GOOGLEFINANCE) are read using the value saved in the file. A `#N/A` price sends that stock to
 Exceptions.
 
 ## Rating and Sentiment rules
 
-A value typed in the Universal Sheet always wins. With Gemini set up (below), a blank Rating / Sentiment is filled by
-Gemini and saved into the sheet. Without Gemini, a blank Rating or Sentiment is filled from
+A value typed in the Universal Sheet always wins. With the narrative API set up (below), a blank Rating / Sentiment is
+filled by it and saved into the sheet. Without it, a blank Rating or Sentiment is filled from
 `config/rating_rules.json` **only after `"approved": true`** is set there. The rules read revenue and PAT YoY from the
 result line. Every run writes `rating_preview.md` with the rating each stock would get, so the rules can be reviewed first.
 
@@ -183,20 +184,19 @@ result line. Every run writes `rating_preview.md` with the rating each stock wou
 Slides 2-5 and 15 hold written analysis. Each run writes `runs/<period>/<client>/outputs/narrative_input.json`: every
 computed fact, plus the list of fields with length limits. To fill them:
 
-1. Draft the text from that file (for example with an AI chat), in the shape of `narrative_template.json`.
+1. Draft the text from that file, in the shape of `narrative_template.json`.
 2. Save it as `runs/<period>/<client>/narrative.json` (or pass `--narrative`).
 3. Run again.
 
 Until then those slides show **PENDING NARRATIVE**. Every number in narrative.json must exist in
 narrative_input.json, otherwise the run fails and lists the figure.
 
-**Gemini: narrative, Rating and Sentiment.** Copy `.env.example` to `.env` (ignored by git), set
-`NARRATIVE_PROVIDER=gemini` and fill in `NARRATIVE_API_KEY` (a Google AI Studio key). `NARRATIVE_MODEL` is optional:
-one model or a comma-separated list in order of preference, e.g.
-`gemini-3.5-flash, gemini-flash-latest, gemini-flash-lite-latest` (blank = a built-in list starting with
-`gemini-pro-latest`). Each client run makes **one request**, which both rates the stocks whose
-Rating / Sentiment is blank in the Universal Sheet and writes the narrative (client name removed). Views always
-come from the Universal Sheet only. Gemini's ratings are written into the Universal Sheet (Rating, Sentiment, and
+**Narrative API: narrative, Rating and Sentiment.** Copy `.env.example` to `.env` (ignored by git) and fill in
+`NARRATIVE_PROVIDER`, `NARRATIVE_API_KEY` and, optionally, `NARRATIVE_MODEL`: one model or a comma-separated list in
+order of preference (blank = the built-in list in `crest/narrative_api.py`). Each client run makes **one request**, which
+both rates the stocks whose Rating / Sentiment is blank in the Universal Sheet and writes the narrative (client name
+and amounts removed). Views always come from the Universal Sheet only. The API's ratings are written into the
+Universal Sheet (Rating, Sentiment, and
 the Rating Source / Rating Reason columns) and kept as a backup in `runs/<period>/ai_ratings.json`; every later run,
 for any client, reads them from there and sends no request for those stocks. A stock is rated again only when its
 result line or commentary changes. If the sheet is open in Excel the write waits for a later run. The narrative is
