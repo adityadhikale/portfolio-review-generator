@@ -16,6 +16,7 @@ from openpyxl import Workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.indexed_list import IndexedList
 
 from .universal import value_number
 
@@ -61,11 +62,22 @@ def _hdr(ws, row, cols, start_col=1):
 
 
 def _font_all(ws, size=10):
+    """Arial everywhere. Unstyled cells already use the workbook default (Arial 10); only cells given another
+    font explicitly are changed, reusing one Font object per (bold, italic, colour)."""
+    cache = {}
     for row in ws.iter_rows():
         for c in row:
-            if c.font is None or c.font.name != FONT:
-                c.font = Font(name=FONT, size=size, bold=c.font.b if c.font else False,
-                              color=c.font.color if c.font else None, italic=c.font.i if c.font else False)
+            if not c.has_style:
+                continue
+            f = c.font
+            if f is not None and f.name == FONT:
+                continue
+            b, i = (bool(f.b), bool(f.i)) if f is not None else (False, False)
+            color = f.color if f is not None else None
+            key = (b, i, getattr(color, "rgb", None), getattr(color, "theme", None))
+            if key not in cache:
+                cache[key] = Font(name=FONT, size=size, bold=b, italic=i, color=color)
+            c.font = cache[key]
 
 
 def build_workbook(path: Path, *, client: str, asof: str, period_label: str, price_source: str,
@@ -74,6 +86,9 @@ def build_workbook(path: Path, *, client: str, asof: str, period_label: str, pri
     """priced: list of Matched sorted by current value desc (only rows with a price).
     snapshot_rows: list of Matched (all matched, incl. those without a price)."""
     wb = Workbook()
+    # Workbook default font = Arial 10, so plain cells need no per-cell font (setting fonts cell by cell made
+    # the build take ~20 s per workbook).
+    wb._fonts = IndexedList([Font(name=FONT, size=10)])
     wb.calculation.fullCalcOnLoad = True
     ws = wb.active
     ws.title = "Portfolio"
@@ -168,8 +183,6 @@ def build_workbook(path: Path, *, client: str, asof: str, period_label: str, pri
     SN = "Universal_Snapshot"
     rng = lambda col: f"{SN}!${col}$2:${col}${s_last}"  # noqa: E731
     look = lambda col, r: f'INDEX({rng(col)},MATCH($A{r},{rng("A")},0))'  # noqa: E731
-    nl = lambda col: f"Holdings_Normalized!${col}$2:${col}${n_last}"  # noqa: E731
-    nlook = lambda col, r: f'INDEX({nl(col)},MATCH($A{r},{nl("A")},0))'  # noqa: E731
     keys = []
     for i, m in enumerate(priced):
         r = first + i

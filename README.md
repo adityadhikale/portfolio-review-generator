@@ -64,7 +64,8 @@ Client data and CREST research never go to GitHub; `.gitignore` excludes them. A
 
 | File | Purpose |
 |---|---|
-| `templates/universal-sheet.xlsx` | The live Universal Sheet (all stocks, results, views) |
+| `templates/universal-sheet.xlsx` | The live Universal Sheet (all stocks, results, views); backups the tool makes before writing to it go to `templates/backups/` |
+| `.env` | Gemini API key and models (copy `.env.example`) |
 | `templates/Deck_-_template.pptx` | The CREST deck template |
 | `input/*` | Client holdings files |
 | `samples/holdings.xlsx`, `samples/reference_portfolio.xlsx`, `samples/reference_deck_Q1FY27.pptx` | Reference files, only needed for the end-to-end tests |
@@ -85,8 +86,12 @@ crest/                     the pipeline
   office.py                LibreOffice: recalculation and PDF conversion
   validate.py              validation gate
   ratings.py               draft Rating / Sentiment rules
+  gemini.py                Gemini client (model list, switching on busy / bad replies)
+  ai_review.py             the single Gemini request per client: ratings + narrative
+  ai_ratings.py            per-quarter backup of Gemini ratings (runs/<period>/ai_ratings.json)
+  sheet_writeback.py       writes Gemini ratings into the Universal Sheet without touching other cells
   deck_data.py             numbers for the deck, read back from the Excel
-  narrative.py             narrative_input.json export, narrative.json import, number checker
+  narrative.py             narrative template, saved narrative.json, number and style checks
   deck_fill.py             fills the PowerPoint template
   qa.py                    deck QA (placeholders, style, overflow, render)
   pipeline.py              runs the steps in order and archives each run
@@ -142,7 +147,8 @@ tools/                     developer helpers (test fixtures, comparison with ref
 7. **QA**: leftover placeholders fail the run. It also checks that the brand is written CREST and that no heading
    starts with a number, estimates text overflow, and renders PDF + PNG.
 8. **Archive**: `runs/<period>/<client>/` keeps inputs, outputs, `narrative_input.json`, slide images and `report.md`.
-   Earlier runs move to `_history/`. Results are copied to `output\<client>\<period>\`.
+   Earlier runs move to `_history/`. Results are copied to `output\<client>\<period>\`; a file there that is open in
+   Excel / PowerPoint is not replaced - the new version is saved beside it as `<name> (new).<ext>`.
 
 **Pricing**: `price_source` in `config/settings.json` (or `--price-source`) is `universal_cmp` (default, the
 Universal Sheet CMP) or `broker_ltp`. One run never mixes the two.
@@ -160,13 +166,15 @@ Blank layout with a column guide: `templates/Universal_Sheet_template.xlsx` (Leg
 | Symbol, Alt Symbols, ISIN | optional | used for matching broker files |
 | Q Result Period | optional | e.g. `Q2 FY27`; sets the run period, and a mismatch stops the run |
 | Short Name, Deck Group, Exchange, Instrument Type | optional | display name, group override, ETF flag (`Sector = ETF` also works) |
+| Rating Source, Rating Reason | written by the tool | added when Gemini fills a blank Rating / Sentiment (`AI · model · period · code`); leave blank for ratings you type |
 
 Formula cells (e.g. GOOGLEFINANCE) are read using the value saved in the file. A `#N/A` price sends that stock to
 Exceptions.
 
 ## Rating and Sentiment rules
 
-A value typed in the Universal Sheet always wins. A blank Rating or Sentiment is filled from
+A value typed in the Universal Sheet always wins. With Gemini set up (below), a blank Rating / Sentiment is filled by
+Gemini and saved into the sheet. Without Gemini, a blank Rating or Sentiment is filled from
 `config/rating_rules.json` **only after `"approved": true`** is set there. The rules read revenue and PAT YoY from the
 result line. Every run writes `rating_preview.md` with the rating each stock would get, so the rules can be reviewed first.
 
@@ -180,8 +188,25 @@ computed fact, plus the list of fields with length limits. To fill them:
 3. Run again.
 
 Until then those slides show **PENDING NARRATIVE**. Every number in narrative.json must exist in
-narrative_input.json, otherwise the run fails and lists the figure. To plug in an AI provider later, add it to
-`PROVIDERS` in `crest/narrative.py` and set `narrative_provider` in settings.
+narrative_input.json, otherwise the run fails and lists the figure.
+
+**Gemini: narrative, Rating and Sentiment.** Copy `.env.example` to `.env` (ignored by git), set
+`NARRATIVE_PROVIDER=gemini` and fill in `NARRATIVE_API_KEY` (a Google AI Studio key). `NARRATIVE_MODEL` is optional:
+one model or a comma-separated list in order of preference, e.g.
+`gemini-3.5-flash, gemini-flash-latest, gemini-flash-lite-latest` (blank = a built-in list starting with
+`gemini-pro-latest`). Each client run makes **one request**, which both rates the stocks whose
+Rating / Sentiment is blank in the Universal Sheet and writes the narrative (client name removed). Views always
+come from the Universal Sheet only. Gemini's ratings are written into the Universal Sheet (Rating, Sentiment, and
+the Rating Source / Rating Reason columns) and kept as a backup in `runs/<period>/ai_ratings.json`; every later run,
+for any client, reads them from there and sends no request for those stocks. A stock is rated again only when its
+result line or commentary changes. If the sheet is open in Excel the write waits for a later run. The narrative is
+saved in `runs/<period>/<client>/narrative.json` and reused. Edit the sheet or that file to correct anything;
+delete the narrative (or a stock's Rating Source) to have it written again. There are no automatic
+correction requests: if the narrative fails a check, the run names the field to edit. If a model is busy, gives
+no answer within 2 minutes, is over quota or not available for the key, the same request goes straight to the
+next model in the list; if all fail, the list is tried once more after 30 seconds. If no model answers, the Excel
+and deck are still built (narrative slides pending) and the next run asks again. Set `narrative_provider` and
+`rating_provider` to `"manual"` / `"rules"` in `config/settings.json` to never call the API.
 
 ## Broker layouts
 
@@ -193,7 +218,11 @@ names to `config/brokers/generic_equity_holdings.json`:
 | `columns` | exact header names per field |
 | `keywords` | whole words looked for inside a header |
 | `exclude` | words that rule a header out (e.g. `Long Term Qty` is not the quantity) |
-| `asof_regex` | reads the as-on date from title rows |
+| `asof_regex` | reads the as-on date from title rows (`dd/mm/yyyy`, `dd-mm-yyyy` or `yyyy-mm-dd`) |
+
+**Workbooks with several sheets** (e.g. `Equity`, `Mutual Funds`, `Combined`): the first sheet with a holdings
+table is used, skipping sheets whose name contains fund / MF / combined / consolidated / summary / bond / debt / ETF.
+The sheet used is shown in `report.md`. If a skipped funds sheet has holdings, the run warns that they are not in the review.
 
 ## Configuration
 

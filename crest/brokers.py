@@ -41,24 +41,55 @@ class BrokerParse:
     notes: list[str]
     dropped: list[dict]                # rows dropped (footer, zero qty, ...)
     asof_in_file: str | None
+    sheet: str | None = None           # workbook sheet the holdings came from (None for CSV)
 
 
-def _read_rows(path: Path) -> list[list]:
+# Sheets that are never the equity holdings table: funds, bonds, or a combined copy of the equity sheet
+# (which would also pull in mutual funds). Matched as whole words in the sheet name, case ignored.
+SKIP_SHEET_WORDS = ("mutual fund", "mutual funds", "mf", "fund", "funds", "combined", "consolidated", "summary",
+                    "bond", "bonds", "debt", "etf", "etfs")
+
+
+def _skip_sheet(title: str) -> bool:
+    t = _norm_header(title)
+    return any(re.search(rf"\b{re.escape(w)}\b", t) for w in SKIP_SHEET_WORDS)
+
+
+def _has_data(rows: list[list]) -> bool:
+    return any(c not in (None, "") for r in rows for c in r)
+
+
+def _read_sheets(path: Path) -> list[tuple[str | None, list[list]]]:
+    """[(sheet name, rows)] for every sheet of a workbook, or [(None, rows)] for a CSV."""
     suf = path.suffix.lower()
     if suf in (".xlsx", ".xlsm"):
         wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-        ws = wb.worksheets[0]
-        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+        out = []
+        for ws in wb.worksheets:
+            # Some broker exports record a wrong sheet size (e.g. A1:A1); read-only mode trusts it and sees
+            # nothing. reset_dimensions() makes it read every row that is really there.
+            ws.reset_dimensions()
+            out.append((ws.title, [list(r) for r in ws.iter_rows(values_only=True)]))
         wb.close()
-        return rows
+        return out
     if suf == ".csv":
         for enc in ("utf-8-sig", "cp1252"):
             try:
                 with open(path, newline="", encoding=enc) as fh:
-                    return [list(r) for r in csv.reader(fh)]
+                    return [(None, [list(r) for r in csv.reader(fh)])]
             except UnicodeDecodeError:
                 continue
     raise PipelineError(f"Unsupported holdings file type: {path.name} (use .xlsx or .csv)")
+
+
+def _normalize_asof(raw: str) -> str:
+    """'2026-10-07', '07-10-2026', '7/10/2026' -> '07/10/2026' (dd/mm/yyyy, the form the pipeline uses)."""
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
+    if m:
+        y, mo, d = m.groups()
+    else:
+        d, mo, y = re.split(r"[/-]", raw)
+    return f"{int(d):02d}/{int(mo):02d}/{y}"
 
 
 def _norm_header(h) -> str:
@@ -122,13 +153,53 @@ def detect(rows: list[list], configs: list[dict], forced: str | None):
     return best
 
 
+def _pick_sheet(path: Path, sheets, configs, forced):
+    """Choose the equity holdings sheet: the first sheet (in workbook order) that is not a fund / combined /
+    summary sheet and has a holdings table. Returns (sheet name, rows, detect() result, notes)."""
+    notes = []
+    if len(sheets) == 1:
+        name, rows = sheets[0]
+        if not _has_data(rows):
+            raise PipelineError(f"The holdings file '{path.name}' is empty. "
+                                "Paste/download the broker data into it, save, and run again.")
+        return name, rows, detect(rows, configs, forced), notes
+
+    skipped = [(n, r) for n, r in sheets if _skip_sheet(n)]
+    tried, chosen = [], None
+    for name, rows in sheets:
+        if _skip_sheet(name) or not _has_data(rows):
+            continue
+        try:
+            chosen = (name, rows, detect(rows, configs, forced))
+            break
+        except PipelineError:
+            tried.append(name)
+    if chosen is None:
+        raise PipelineError(
+            f"No equity holdings table found in '{path.name}'. Sheets: {[n for n, _ in sheets]}. "
+            f"Checked {tried or 'none (all empty)'}; skipped as funds/combined/summary: {[n for n, _ in skipped]}. "
+            "Put the equity holdings on a sheet of its own, or add its header names to "
+            "config/brokers/generic_equity_holdings.json.")
+
+    name = chosen[0]
+    notes.append(f"Workbook has {len(sheets)} sheets {[n for n, _ in sheets]}; equity holdings read from sheet '{name}'")
+    for sname, srows in skipped:
+        # Warn when a skipped non-combined sheet (e.g. Mutual Funds) actually holds rows: they are left out of the review.
+        if re.search(r"\b(combined|consolidated|summary)\b", _norm_header(sname)) or not _has_data(srows):
+            continue
+        try:
+            cfg, h, idx, _ = detect(srows, configs, forced)
+        except PipelineError:
+            continue
+        n = sum(1 for r in srows[h + 1:] if to_number(r[idx["quantity"]] if idx["quantity"] < len(r) else None))
+        if n:
+            notes.append(f"WARN: sheet '{sname}' has {n} holding row(s) that are not in this review (equity only)")
+    return chosen[0], chosen[1], chosen[2], notes
+
+
 def parse_holdings(path: Path, forced_broker: str | None = None) -> BrokerParse:
-    rows = _read_rows(path)
-    if not any(c not in (None, "") for r in rows for c in r):
-        raise PipelineError(f"The holdings file '{path.name}' is empty (its first sheet has no data). "
-                            "Paste/download the broker data into it, save, and run again.")
-    cfg, h_idx, col_idx, col_map = detect(rows, load_broker_configs(), forced_broker)
-    header = rows[h_idx]
+    sheet, rows, (cfg, h_idx, col_idx, col_map), notes = _pick_sheet(
+        path, _read_sheets(path), load_broker_configs(), forced_broker)
 
     asof = None
     if cfg.get("asof_regex"):
@@ -136,9 +207,9 @@ def parse_holdings(path: Path, forced_broker: str | None = None) -> BrokerParse:
             for c in row:
                 m = re.search(cfg["asof_regex"], str(c or ""), re.I)
                 if m:
-                    asof = m.group(1)
+                    asof = _normalize_asof(m.group(1))
 
-    notes, dropped = [], []
+    dropped = []
     merged: dict[str, Holding] = {}
     for i in range(h_idx + 1, len(rows)):
         row = rows[i]
@@ -180,4 +251,4 @@ def parse_holdings(path: Path, forced_broker: str | None = None) -> BrokerParse:
             dropped.append({"row": h.source_rows, "reason": "zero quantity after merging duplicates", "values": [h.raw_symbol]})
     if not holdings:
         raise PipelineError("No holdings rows found in the holdings file.")
-    return BrokerParse(cfg["name"], h_idx + 1, col_map, rows, holdings, notes, dropped, asof)
+    return BrokerParse(cfg["name"], h_idx + 1, col_map, rows, holdings, notes, dropped, asof, sheet)

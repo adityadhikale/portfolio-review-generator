@@ -3,9 +3,9 @@
 The pipeline never writes analysis itself. It exports narrative_input.json (every computed fact for
 the run plus the narrative.json schema with length limits), and reads narrative.json back.
 
-Providers: only "manual" ships (reads narrative.json). To plug in an AI provider later, add a class
-with the same `get(narrative_input) -> dict | None` method to PROVIDERS and set
-settings.json -> narrative_provider. The checker below runs on every provider's output.
+A saved narrative.json is always used as-is (ManualProvider). When none exists and Gemini is selected
+(settings.json -> narrative_provider "auto" with a key in .env, or "gemini"), crest/ai_review.py writes it in
+the same single request as the ratings. The checker below runs on every narrative.
 """
 from __future__ import annotations
 
@@ -31,6 +31,8 @@ SCHEMA = {
     "slide5.best": ("Text after 'Best results of the quarter:'.", 330),
     "slide5.weakest": ("Text after 'Weakest results of the quarter:'.", 330),
     "slide5.broad_theme": ("Text after 'Broad theme:'.", 330),
+    "slide15.title_suffix": ("Optional. Title after 'Market Outlook - ' (slide 15). Default: 'Positioning for the "
+                             "<panel.time_horizon>'.", 50),
     "slide15.our_view": ("Text after 'Our view:'.", 200),
     "slide15.investment_stance": ("Text after 'Investment stance:'.", 330),
     "slide15.time_horizon": ("Text after 'Time horizon:'.", 90),
@@ -51,8 +53,10 @@ def blank_template() -> dict:
         for p in parts[:-1]:
             cur = cur.setdefault(p, {})
         leaf = parts[-1]
-        if leaf in ("read_through", "themes"):
-            cur[leaf] = []
+        if leaf == "themes":
+            cur[leaf] = [""] * 6          # the template has exactly 6 theme tiles
+        elif leaf == "read_through":
+            cur[leaf] = [""] * 5          # 5-8 bullets
         elif leaf == "cards":
             cur[leaf] = [{"heading": "", "body": ""}] * 6 if parts[0] == "slide3" else [{"symbol": "", "body": ""}] * 4
         else:
@@ -85,14 +89,13 @@ class ManualProvider:
             raise PipelineError(f"narrative.json is not valid JSON: {exc}") from exc
 
 
-PROVIDERS = {"manual": ManualProvider}
-
-
-def get_provider(name: str, narrative_path: Path | None):
-    if name not in PROVIDERS:
-        raise PipelineError(f"narrative_provider '{name}' is not available. Implemented: {list(PROVIDERS)}. "
-                            "See crest/narrative.py to add one.")
-    return PROVIDERS[name](narrative_path)
+def resolve_provider_name(setting: str, env: dict) -> str:
+    """'auto' -> 'gemini' when .env names Gemini and has a key, else 'manual'. Gemini's narrative is requested in
+    the same single call as the ratings (crest/ai_review.py); ManualProvider always reads a saved narrative.json."""
+    if setting != "auto":
+        return setting
+    name = (env.get("NARRATIVE_PROVIDER") or "").strip().lower()
+    return name if name and name != "manual" and env.get("NARRATIVE_API_KEY") else "manual"
 
 
 # --------------------------------------------------------------------------- number checker

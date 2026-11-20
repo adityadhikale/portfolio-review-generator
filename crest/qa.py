@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 
 from pptx import Presentation
-from pptx.util import Emu
 
 PLACEHOLDER = re.compile(r"\{\s*\}|\[\s*\]|\{\s*Heading\s*\}|\[\s*Name\s*\]|dd/mm/yyyy|FY2\[\]|FY\[\s*\]|202\[\]|�")
 EMU_PER_PT = 12700

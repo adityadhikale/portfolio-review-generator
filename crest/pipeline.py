@@ -7,18 +7,24 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from openpyxl.utils import get_column_letter
+
 from . import deck_data as dd
 from . import validate as V
+from .ai_ratings import RatingCache, rating_basis
+from .ai_review import request_review
 from .brokers import parse_holdings
 from .deck_fill import fill_deck
 from .excel_build import build_workbook
-from .match import MatchException, match_holdings
-from .narrative import SCHEMA, blank_template, check_numbers, get_provider, style_issues
+from .gemini import GeminiClient, resolve_ai
+from .match import match_holdings
+from .narrative import SCHEMA, ManualProvider, blank_template, check_numbers, resolve_provider_name, style_issues
 from .office import find_soffice, recalculate_copy
 from .qa import render, run_qa
 from .ratings import RatingRules
+from .sheet_writeback import ai_tag, tag_basis, write_cells
 from .universal import load_universe, value_number
-from .util import CONFIG_DIR, ROOT, PipelineError, load_json, parse_asof, parse_period, safe_filename
+from .util import CONFIG_DIR, ROOT, PipelineError, load_env, load_json, parse_asof, parse_period, safe_filename
 
 
 @dataclass
@@ -99,22 +105,45 @@ def run(*, client, period, asof, universal, holdings, template, narrative=None, 
     finally:
         from .report import write_report
         write_report(res, run_dir / "report.md")
-        if publish_dir:
-            _publish(res, Path(publish_dir) / safe_filename(client) / per.compact)
+        if publish_dir and _publish(res, Path(publish_dir) / safe_filename(client) / per.compact):
+            write_report(res, run_dir / "report.md")  # add the locked-file note
+            shutil.copy2(run_dir / "report.md", res.outputs["published_to"] / "report.md")
     return res
 
 
-def _publish(res, dest: Path):
-    """Copy the results (Excel, deck, PDF, report, rating preview) to output/<client>/<period>/."""
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True)
-    for key in ("excel", "deck", "pdf", "rating_preview"):
-        p = res.outputs.get(key)
-        if p and Path(p).exists():
-            shutil.copy2(p, dest / Path(p).name)
-    shutil.copy2(res.run_dir / "report.md", dest / "report.md")
+def _publish(res, dest: Path) -> bool:
+    """Copy the results (Excel, deck, PDF, report, ratings) to output/<client>/<period>/. A file that is open
+    in Excel / PowerPoint cannot be replaced: the new version is saved next to it as '<name> (new).<ext>' and
+    a note says so, instead of the run crashing. Returns True when such a note was added."""
+    dest.mkdir(parents=True, exist_ok=True)
+    files = [Path(p) for k in ("excel", "deck", "pdf", "rating_preview", "ai_ratings")
+             if (p := res.outputs.get(k)) and Path(p).exists()] + [res.run_dir / "report.md"]
+    keep = {f.name for f in files}
+    for old in dest.iterdir():  # results from an earlier run that this run did not produce
+        if old.is_file() and old.name not in keep and " (new)" not in old.stem and not old.name.startswith("~$"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    locked = []
+    for f in files:
+        try:
+            shutil.copy2(f, dest / f.name)
+            stale = dest / f"{f.stem} (new){f.suffix}"
+            if stale.exists():
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+        except PermissionError:
+            alt = dest / f"{f.stem} (new){f.suffix}"
+            shutil.copy2(f, alt)
+            locked.append(f"{f.name} -> {alt.name}")
     res.outputs["published_to"] = dest
+    if locked:
+        res.notes.append("WARN: file(s) open in another program could not be replaced in the output folder; the new "
+                         "version is saved next to them: " + "; ".join(locked) + ". Close them and re-run to tidy up.")
+    return bool(locked)
 
 
 def _run_inner(res, settings, per, client, asof, universal, holdings, template, narrative_path, broker, out, render_png):
@@ -124,7 +153,7 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
 
     # 1. broker adapter
     bp = parse_holdings(holdings, broker)
-    res.info.update(broker=bp.broker, header_row=bp.header_row, column_map=bp.column_map,
+    res.info.update(broker=bp.broker, holdings_sheet=bp.sheet or "n/a (CSV)", header_row=bp.header_row, column_map=bp.column_map,
                     holdings_parsed=len(bp.holdings), asof_in_file=bp.asof_in_file)
     if Path(narrative_path).exists():
         shutil.copy2(narrative_path, res.run_dir / "inputs" / "narrative.json")
@@ -168,13 +197,28 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
                               f"{len(wrong_period)} row(s) hold results for another quarter" if wrong_period
                               else "All filled rows match (or column absent)", wrong_period))
 
-    # Rating / Sentiment: Universal Sheet value > approved rule > blank
+    # Rating / Sentiment: Universal Sheet value > Gemini (when .env has a key) > approved rule > blank.
+    # Views are never set here: they are CREST's own call, from the Universal Sheet only.
+    # Saved Gemini ratings are applied here; stocks still unrated are rated later in the run's single Gemini
+    # request (step 7), together with the narrative.
+    env = load_env()
+    rp = settings.get("rating_provider", "auto")
+    ai_on = rp == "gemini" or (rp == "auto" and resolve_ai(env))
+    rating_cache, ai_need, ai_to_rate = None, [], []
+    if ai_on:
+        _use_sheet_ai_ratings(res, matched)
+        rating_cache, ai_need, ai_to_rate = _apply_saved_ai_ratings(res, matched)
+    pending_ai = {t["symbol"] for t in ai_to_rate}
     rr = settings.get('rating_rules_file')
     rules = RatingRules(load_json(Path(rr) if Path(rr).is_absolute() else ROOT / rr) if rr else None)
     preview = []
     for m in matched:
+        if ai_on:  # Gemini rated what it could (outputs/ai_ratings.md); the draft rules are not used
+            m.uni.rating_source = "Universal Sheet" if m.uni.rating and getattr(m.uni, "rating_source", "") != "AI (Gemini)" \
+                else getattr(m.uni, "rating_source", "")
+            continue
         u = m.uni
-        u.rating_source = "Universal Sheet" if u.rating else ""
+        u.rating_source = "Universal Sheet" if u.rating else getattr(u, "rating_source", "")
         if u.is_etf:
             continue
         rt, se, why = rules.evaluate(u.values.get("result"))
@@ -211,7 +255,8 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
         if not u.is_etf:
             miss = [f for f, k in (("Result Line", "result"), ("Management Commentary", "commentary"))
                     if not (u.values.get(k) or "")]
-            miss += [f for f, v in (("Rating", u.rating), ("Sentiment", u.sentiment)) if not v]
+            if u.key not in pending_ai:  # those are rated in step 7
+                miss += [f for f, v in (("Rating", u.rating), ("Sentiment", u.sentiment)) if not v]
             if miss:
                 res.exceptions.append(Exc("WARN", "Missing quarterly data", h.raw_symbol, f"Universal row {u.row}: no {', '.join(miss)}"))
             if value_number(u, "mcap") is None:
@@ -301,21 +346,78 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
         raise PipelineError("Validation gate failed - see the checks table. Excel was written for inspection; deck not built.")
 
     # 6. deck data + narrative_input.json
-    data = dd.build_deck_data(excel_vals, client=client, period=per, asof=asof, price_source=ps,
-                              group_order=groups_cfg["group_order"], unmapped_group=groups_cfg["unmapped_group"],
-                              tail_pct=settings["deck"]["tail_weight_threshold_pct"], top_n=settings["deck"]["top_n"])
-    ni = {k: v for k, v in data.items() if not k.startswith("_")}
-    ni["narrative_schema"] = {k: {"description": d, "max_chars": n} for k, (d, n) in SCHEMA.items()}
-    ni["rules"] = ["Use only figures that appear in this file; every number in narrative.json is checked against it.",
-                   "Write the brand as CREST. Do not start a heading with a number.",
-                   "Keep each field within max_chars so it fits its box."]
-    (out / "narrative_input.json").write_text(json.dumps(ni, indent=2, ensure_ascii=False), encoding="utf-8")
+    def deck_data_and_input():
+        d = dd.build_deck_data(excel_vals, client=client, period=per, asof=asof, price_source=ps,
+                               group_order=groups_cfg["group_order"], unmapped_group=groups_cfg["unmapped_group"],
+                               tail_pct=settings["deck"]["tail_weight_threshold_pct"], top_n=settings["deck"]["top_n"])
+        n = {k: v for k, v in d.items() if not k.startswith("_")}
+        n["narrative_schema"] = {k: {"description": ds, "max_chars": mx} for k, (ds, mx) in SCHEMA.items()}
+        n["rules"] = ["Use only figures that appear in this file; every number in narrative.json is checked against it.",
+                      "Write the brand as CREST. Do not start a heading with a number.",
+                      "Keep each field within max_chars so it fits its box."]
+        (out / "narrative_input.json").write_text(json.dumps(n, indent=2, ensure_ascii=False), encoding="utf-8")
+        return d, n
+
+    data, ni = deck_data_and_input()
     (out / "narrative_template.json").write_text(json.dumps(blank_template(), indent=2), encoding="utf-8")
     res.outputs["narrative_input"] = out / "narrative_input.json"
 
-    # 7. narrative
-    prov = get_provider(settings["narrative_provider"], narrative_path)
-    nar = prov.get(ni)
+    # 7. narrative + Gemini. A saved narrative.json is always used as-is. Missing ratings and a missing narrative
+    # are requested from Gemini together, in ONE request (none at all when nothing is missing).
+    nar = ManualProvider(Path(narrative_path)).get(ni)
+    want_nar = nar is None and resolve_provider_name(settings["narrative_provider"], env) == "gemini"
+    res.info["narrative_provider"] = "saved narrative.json" if nar is not None else ("gemini" if want_nar else "none")
+    res.info["gemini_requests"] = 0
+    if ai_to_rate or want_nar:
+        gc = GeminiClient(api_key=env.get("NARRATIVE_API_KEY", ""), model=env.get("NARRATIVE_MODEL") or None)
+        what = " and ".join(x for x in ((f"rating {len(ai_to_rate)} stock(s)" if ai_to_rate else ""),
+                                       ("writing the narrative" if want_nar else "")) if x)
+        print(f"  Gemini: one request - {what} (models in order: {', '.join(gc.models)}) ...", flush=True)
+        try:
+            got, gnar, gnotes = request_review(gc, narrative_input=ni if want_nar else None, to_rate=ai_to_rate)
+        except PipelineError as e:
+            # Gemini down / overloaded / bad reply: still deliver the Excel and deck. Unrated stocks show n/a and the
+            # narrative slides stay PENDING; the next run asks Gemini again for just what is still missing.
+            got, gnar, gnotes = {}, None, [f"WARN: Gemini request failed, so the deck was built without it ({e}). "
+                                           "Run again later; it will ask Gemini again for: " + what + "."]
+            res.checks.append(V.Check("Gemini request (ratings / narrative)", "WARN", "failed - deck built without it",
+                                      [str(e)]))
+        if gc.last_bad_reply:
+            (out / "gemini_unreadable_reply.txt").write_text(gc.last_bad_reply, encoding="utf-8")
+        res.info["gemini_requests"] = len(gc.tried) + (0 if not (got or gnar) else 1)
+        res.info["gemini_model"] = gc.model if (got or gnar) else "none answered"
+        if gc.tried:
+            res.notes.append("Gemini models that could not answer (switched): " + "; ".join(gc.tried))
+        res.notes += gnotes
+        stored = rating_cache.store(ai_to_rate, got, gc.model) if ai_to_rate else {}
+        if stored:
+            for m in ai_need:
+                g = stored.get(m.uni.key)
+                if g:
+                    _set_ai_rating(m.uni, g)
+                    snap = excel_vals["snapshot"].get(m.uni.key)
+                    if snap is not None:
+                        snap["rating"], snap["sentiment"] = m.uni.rating, m.uni.sentiment
+            # ratings appear in the workbook (Universal_Snapshot) and in the deck data: rebuild both
+            build_workbook(xlsx, client=client, asof=asof, period_label=per.label, price_source=ps, parse=bp,
+                           priced=priced, snapshot_rows=matched, exception_rows=exc_rows, deck_group_of=deck_group_of)
+            data, ni = deck_data_and_input()
+            res.notes.append(f"WARN: Rating/Sentiment for {len(stored)} stock(s) written by Gemini ({gc.model}) and "
+                             f"saved to {rating_cache.path} - review before sending")
+        if gnar:
+            nar = {"_note": "Written automatically by Gemini. Review and edit before sending; delete this file to "
+                            "have it written again.", **gnar}
+            Path(narrative_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(narrative_path).write_text(json.dumps(nar, indent=2, ensure_ascii=False), encoding="utf-8")
+            res.notes.append(f"WARN: narrative written by Gemini ({gc.model}) and saved to {narrative_path} - review it "
+                             "before sending the deck")
+    elif nar is not None and resolve_provider_name(settings["narrative_provider"], env) == "gemini":
+        res.notes.append(f"Narrative: used the saved {Path(narrative_path).name} (delete it to have Gemini write a new one)")
+    if ai_on:
+        _write_back_to_sheet(res, uni, matched, rating_cache, per)
+        shown = [m for m in matched if m in ai_need or getattr(m.uni, "rating_source", "") == "AI (Gemini)"]
+        if shown:
+            _write_ai_ratings_md(res, shown, rating_cache)
     res.narrative["present"] = nar is not None
     if nar is not None:
         bad_nums = check_numbers(nar, ni, settings.get("narrative_allowed_numbers", []))
@@ -333,12 +435,13 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
         res.checks.append(V.Check("Narrative house style (CREST caps, headings, length)",
                                   "FAIL" if hard else ("WARN" if st else "PASS"), f"{len(st)} issue(s)", st))
         if any(c.status == "FAIL" for c in res.checks):
-            raise PipelineError("Narrative checks failed - fix narrative.json (see checks table) and re-run.")
+            raise PipelineError(f"Narrative checks failed - edit {narrative_path} (see the checks table for the "
+                                "exact fields) and re-run; a saved narrative.json is not sent to Gemini again.")
 
     # 8. deck
     deck = out / f"{safe_filename(client).replace(' ', '_')}_CREST_Portfolio_{per.compact}_Review.pptx"
     fill = fill_deck(template, deck, data=data, narrative=nar, period=per, client=client, asof=asof,
-                     dcfg=settings["deck"])
+                     dcfg=settings["deck"], ratings_by_ai=ai_on, price_source=ps)
     res.outputs["deck"] = deck
     res.narrative["pending_fields"] = fill["pending"]
     res.narrative["problems"] = fill["problems"]
@@ -363,6 +466,117 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
     if any(c.status == "FAIL" for c in res.checks):
         raise PipelineError("Deck QA failed - see the checks table.")
     res.status = "PASSED WITH WARNINGS" if any(c.status == "WARN" for c in res.checks) or fill["pending"] else "PASSED"
+
+
+def _ai_items(ms):
+    return [{"symbol": m.uni.key, "name": m.uni.values.get("name"), "sector": m.uni.values.get("sector"),
+             "result": m.uni.values.get("result"), "commentary": m.uni.values.get("commentary")} for m in ms]
+
+
+def _set_ai_rating(u, g):
+    """Fill only what the Universal Sheet left blank; a typed value always wins."""
+    typed = bool(u.rating)
+    if not u.rating:
+        u.rating = g["rating"]
+    if not u.sentiment:
+        u.sentiment = g["sentiment"]
+    u.rating_source = "Universal Sheet" if typed else "AI (Gemini)"
+
+
+def _use_sheet_ai_ratings(res, matched):
+    """Ratings the tool wrote into the Universal Sheet earlier ('AI ...' in Rating Source) are used as-is while
+    the stock's result line and commentary are unchanged; if those changed, the stock is rated again."""
+    used = stale = 0
+    for m in matched:
+        u = m.uni
+        b = tag_basis(u.values.get("rating_source"))
+        if b is None or u.is_etf:
+            continue
+        if b == rating_basis(_ai_items([m])[0]) and u.rating and u.sentiment:
+            u.rating_source, u.sheet_ai = "AI (Gemini)", True
+            used += 1
+        else:
+            u.rating, u.sentiment = "", ""
+            stale += 1
+    if used:
+        res.notes.append(f"Rating/Sentiment for {used} stock(s) from earlier Gemini answers saved in the Universal "
+                         "Sheet (no request)")
+    if stale:
+        res.notes.append(f"{stale} stock(s) had an AI rating in the Universal Sheet but their result line or "
+                         "commentary changed since - rated again")
+
+
+def _write_back_to_sheet(res, uni, matched, cache, per):
+    """Save Gemini's ratings into the Universal Sheet (Rating, Sentiment, Rating Source, Rating Reason) so the next
+    run reads them from the sheet. Only stocks whose Rating AND Sentiment were blank in the sheet are written."""
+    todo = [m for m in matched if getattr(m.uni, "rating_source", "") == "AI (Gemini)"
+            and not getattr(m.uni, "sheet_ai", False) and m.uni.key in cache.data
+            and (tag_basis(m.uni.values.get("rating_source")) is not None      # earlier AI value, now refreshed
+                 or (not str(m.uni.values.get("rating") or "").strip()         # or both cells blank in the sheet
+                     and not str(m.uni.values.get("sentiment") or "").strip()))]
+    if not todo:
+        return
+    ci = uni.col_index
+    last = max((i for i, h in enumerate(uni.headers) if str(h or "").strip()), default=len(uni.headers) - 1)
+    src_i = ci.get("rating_source", last + 1)
+    rsn_i = ci.get("rating_reason", max(last, src_i) + 1)
+    L = lambda i: get_column_letter(i + 1)  # noqa: E731
+    updates = {}
+    if "rating_source" not in ci or "rating_reason" not in ci:
+        updates[uni.header_row] = {L(src_i): "Rating Source", L(rsn_i): "Rating Reason"}
+    for m in todo:
+        e = cache.data[m.uni.key]
+        updates[m.uni.row] = {L(ci["rating"]): m.uni.rating, L(ci["sentiment"]): m.uni.sentiment,
+                              L(src_i): ai_tag(e.get("model", "gemini"), per.compact, e.get("basis", "")),
+                              L(rsn_i): e.get("reason", "")}
+    try:
+        n = write_cells(uni.path, uni.sheet, updates)
+        res.notes.append(f"Saved Gemini's Rating/Sentiment for {len(todo)} stock(s) into the Universal Sheet "
+                         f"({uni.path.name}: Rating, Sentiment, Rating Source, Rating Reason; {n} row(s); backup in "
+                         f"{uni.path.parent.name}/backups) - next runs read them from the sheet")
+    except PermissionError:
+        res.notes.append(f"WARN: the Universal Sheet is open in another program, so Gemini's ratings were not written "
+                         f"into it; they are kept in {cache.path.name} (no new request) and will be written on a run "
+                         "when the sheet is closed")
+    except Exception as e:  # noqa: BLE001 - never lose a run over the write-back
+        res.notes.append(f"WARN: could not write Gemini's ratings into the Universal Sheet ({e}); they are kept in "
+                         f"{cache.path.name}")
+
+
+def _apply_saved_ai_ratings(res, matched):
+    """Apply ratings saved in runs/<period>/ai_ratings.json. -> (cache, stocks needing a rating, items to request)."""
+    need = [m for m in matched if not m.uni.is_etf and (not m.uni.rating or not m.uni.sentiment)]
+    cache = RatingCache(res.run_dir.parent / "ai_ratings.json")
+    cached, todo, _nodata = cache.split(_ai_items(need))
+    for m in need:
+        if m.uni.key in cached:
+            _set_ai_rating(m.uni, cached[m.uni.key])
+    if cached:
+        res.notes.append(f"Rating/Sentiment for {len(cached)} stock(s) from the saved {cache.path.name} (no request)")
+    return cache, need, todo
+
+
+def _write_ai_ratings_md(res, need, cache):
+    rows = []
+    for m in need:
+        u, g = m.uni, dict(cache.data.get(m.uni.key) or {})
+        if getattr(u, "sheet_ai", False):
+            g.setdefault("reason", u.values.get("rating_reason") or "")
+        has_data = u.values.get("result") or u.values.get("commentary")
+        why = g.get("reason") if has_data and g else (
+            "not rated: Gemini gave no valid answer" if has_data else
+            "no result line or commentary in the Universal Sheet - not rated")
+        rows.append((m.holding.raw_symbol, u.rating or "n/a", u.sentiment or "n/a", why))
+    out = res.run_dir / "outputs" / "ai_ratings.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    L = ["# Rating / Sentiment by Gemini", "",
+         "Only stocks with a blank Rating or Sentiment in the Universal Sheet are listed; a value typed in the sheet "
+         "always wins. Shared for this period in `../ai_ratings.json` (edit it to correct a rating; delete an entry "
+         "to have it rated again).", "",
+         "| Symbol | Rating | Sentiment | Reason |", "|---|---|---|---|"]
+    L += [f"| {s} | {r} | {se} | {str(why).replace('|', '/')} |" for s, r, se, why in rows]
+    out.write_text("\n".join(L) + "\n", encoding="utf-8")
+    res.outputs["ai_ratings"] = out
 
 
 def _write_rating_preview(path, rows, approved):

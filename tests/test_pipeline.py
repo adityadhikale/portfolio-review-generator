@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import openpyxl
 from pptx import Presentation
@@ -32,6 +33,17 @@ HOLD, TPL, UNI = S / "holdings.xlsx", ROOT / "templates" / "Deck_-_template.pptx
 ARGS = dict(client="Sample Client", period="Q1FY27", asof="08/10/2026", universal=UNI, holdings=HOLD, template=TPL)
 HAVE_SAMPLES = all(p.exists() for p in (HOLD, TPL, UNI, FX / "narrative_reference.json"))
 needs_samples = unittest.skipUnless(HAVE_SAMPLES, "private sample files not present (not in git)")
+
+# Tests never call the Gemini API: ignore any real key in .env (narrative_provider 'auto' -> manual).
+_offline = mock.patch("crest.pipeline.load_env", return_value={})
+
+
+def setUpModule():
+    _offline.start()
+
+
+def tearDownModule():
+    _offline.stop()
 
 
 class Units(unittest.TestCase):
@@ -115,6 +127,238 @@ class BrokerAdapter(unittest.TestCase):
             f.write_text("foo,bar\n1,2\n", encoding="utf-8")
             with self.assertRaises(PipelineError):
                 parse_holdings(f)
+
+    def test_multi_sheet_workbook(self):
+        """Broker export with Summary / Equity / Mutual Funds / Combined sheets: only Equity is read."""
+        hdr = ["Symbol", "ISIN", "Quantity Available", "Quantity Long Term", "Average Price", "Previous Closing Price"]
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "h.xlsx"
+            wb = openpyxl.Workbook()
+            s = wb.active
+            s.title = "Summary"
+            s.append(["Invested Value", 1000])
+            eq = wb.create_sheet("Equity")
+            eq.append(["Equity Holdings Statement as on 2026-10-07"])
+            eq.append(hdr)
+            eq.append(["ABC", "INE000A01011", 10, 5, 100, 120])
+            eq.append(["XYZ", "INE000A01029", 4, 0, 50, 40])
+            mf = wb.create_sheet("Mutual Funds")
+            mf.append(["Symbol", "ISIN", "Quantity Available", "Average Price"])
+            mf.append(["SOMEFUND", "INF000A01011", 12.5, 30])
+            cb = wb.create_sheet("Combined")
+            cb.append(hdr)
+            cb.append(["ABC", "INE000A01011", 10, 5, 100, 120])
+            cb.append(["SOMEFUND", "INF000A01011", 12.5, 0, 30, 31])
+            wb.save(f)
+            p = parse_holdings(f)
+            self.assertEqual(p.sheet, "Equity")
+            self.assertEqual([h.symbol for h in p.holdings], ["ABC", "XYZ"])
+            self.assertEqual(p.column_map["quantity"], "Quantity Available")
+            self.assertEqual(p.asof_in_file, "07/10/2026")
+            self.assertTrue(any("Mutual Funds" in n and n.startswith("WARN") for n in p.notes))
+            self.assertFalse(any("Combined" in n and n.startswith("WARN") for n in p.notes))
+
+    def test_multi_sheet_no_equity_table(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "h.xlsx"
+            wb = openpyxl.Workbook()
+            wb.active.title = "Notes"
+            wb.active.append(["nothing here"])
+            wb.create_sheet("Combined").append(["Symbol", "Qty", "Avg Price"])
+            wb.save(f)
+            with self.assertRaises(PipelineError) as cm:
+                parse_holdings(f)
+            self.assertIn("Combined", str(cm.exception))
+
+    def test_asof_formats(self):
+        from crest.brokers import _normalize_asof
+        self.assertEqual(_normalize_asof("2026-10-07"), "07/10/2026")
+        self.assertEqual(_normalize_asof("7-10-2026"), "07/10/2026")
+        self.assertEqual(_normalize_asof("08/10/2026"), "08/10/2026")
+
+
+class GeminiSingleRequest(unittest.TestCase):
+    """The one combined Gemini request (ratings + narrative), with the HTTP call replaced: no network."""
+    NI = {"run": {"client": "Secret Client", "period": "Q2FY27"},
+          "portfolio": {"unrealized_pnl_pct": 37.28, "holdings_count": 39},
+          "top_holdings": [{"symbol": "ABC", "weight_pct": 21.0}]}
+    ITEMS = [{"symbol": "AAA", "name": "Aaa Ltd", "sector": "Pharma", "result": "Rev +30% YoY; PAT +50% YoY", "commentary": "Strong"},
+             {"symbol": "BBB", "name": "Bbb Ltd", "sector": "Bank", "result": "PAT -40% YoY", "commentary": ""},
+             {"symbol": "CCC", "name": "Ccc Ltd", "sector": "IT", "result": "", "commentary": ""}]
+
+    @staticmethod
+    def _client(replies):
+        from crest.gemini import GeminiClient
+        sent = []
+
+        def post(url, body):
+            sent.append((url, body))
+            return {"candidates": [{"content": {"parts": [{"text": json.dumps(replies.pop(0))}]}}]}
+        return GeminiClient(api_key="k", post=post), sent
+
+    def test_one_request_for_ratings_and_narrative(self):
+        from crest.ai_review import request_review
+        nar = {"slide2": {"headline": "Steady compounding"}}
+        reply = {"ratings": [{"symbol": "AAA", "rating": "excellent", "sentiment": "Bullish", "reason": "Strong"},
+                             {"symbol": "BBB", "rating": "Terrible", "sentiment": "Bearish"}],
+                 "narrative": nar}
+        gc, sent = self._client([reply])
+        ratings, narrative, notes = request_review(gc, narrative_input=self.NI, to_rate=self.ITEMS[:2])
+        self.assertEqual(len(sent), 1)                                   # exactly one request
+        self.assertEqual(ratings, {"AAA": {"rating": "Excellent", "sentiment": "Bullish", "reason": "Strong"}})
+        self.assertEqual(narrative, nar)
+        self.assertTrue(any("BBB" in n for n in notes))                  # invalid -> n/a, no retry request
+        body = json.dumps(sent[0][1])
+        self.assertNotIn("Secret Client", body)
+        self.assertIn("gemini-pro-latest", sent[0][0])   # first model of the built-in list
+
+    def test_switches_model_when_busy(self):
+        from crest.gemini import GeminiClient, ModelUnavailable
+        urls, waits = [], []
+
+        def post(url, body):
+            urls.append(url)
+            if "busy-1" in url or "busy-2" in url:
+                raise ModelUnavailable("503 busy")
+            return {"candidates": [{"content": {"parts": [{"text": "{}"}]}}]}
+        gc = GeminiClient(api_key="k", model="busy-1, busy-2, ok-3", post=post, sleep=waits.append)
+        self.assertEqual(gc.generate("s", []), "{}")
+        self.assertEqual([u.split("/models/")[1].split(":")[0] for u in urls], ["busy-1", "busy-2", "ok-3"])
+        self.assertEqual(gc.model, "ok-3")
+        self.assertEqual(waits, [])                                # switching does not wait
+        self.assertEqual(len(gc.tried), 2)
+
+    def test_all_models_busy_two_passes_then_stop(self):
+        from crest.gemini import GeminiClient, ModelUnavailable
+        urls, waits = [], []
+
+        def post(url, body):
+            urls.append(url)
+            raise ModelUnavailable("503 busy")
+        gc = GeminiClient(api_key="k", model="a,b", post=post, sleep=waits.append)
+        with self.assertRaises(PipelineError):
+            gc.generate("s", [])
+        self.assertEqual(len(urls), 4)                             # each model twice
+        self.assertEqual(waits, [30])
+
+    def test_reply_parsing_and_repair(self):
+        from crest.gemini import parse_json_object as p
+        self.assertEqual(p('```json\n{"a": 1}\n```'), {"a": 1})
+        self.assertEqual(p('Here you go: {"a": 1} hope it helps'), {"a": 1})
+        self.assertEqual(p('{"a": {"b": [1, "x}"'), {"a": {"b": [1, "x}"]}})   # missing closers added
+        for bad in ("no json at all", "[1, 2]", '{"a": 1,, "b": 2}'):
+            with self.assertRaises(ValueError):
+                p(bad)
+
+    def test_unusable_reply_switches_model(self):
+        from crest.gemini import GeminiClient
+        urls = []
+
+        def post(url, body):
+            urls.append(url)
+            text = "not json" if "bad" in url else '{"ok": true}'
+            return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+        gc = GeminiClient(api_key="k", model="bad,good", post=post)
+        self.assertEqual(gc.generate_json("s", []), {"ok": True})
+        self.assertEqual(gc.model, "good")
+        self.assertEqual(gc.last_bad_reply, "not json")
+
+    def test_fatal_error_does_not_switch(self):
+        from crest.gemini import GeminiClient
+        urls = []
+
+        def post(url, body):
+            urls.append(url)
+            raise PipelineError("Gemini API error 400")
+        gc = GeminiClient(api_key="k", model="a,b", post=post)
+        with self.assertRaises(PipelineError):
+            gc.generate("s", [])
+        self.assertEqual(len(urls), 1)
+
+    def test_ratings_only_and_nothing_to_do(self):
+        from crest.ai_review import request_review
+        gc, sent = self._client([{"ratings": [{"symbol": "AAA", "rating": "Good", "sentiment": "Neutral"}]}])
+        ratings, narrative, _ = request_review(gc, narrative_input=None, to_rate=self.ITEMS[:1])
+        self.assertEqual(ratings["AAA"]["rating"], "Good")
+        self.assertIsNone(narrative)
+        self.assertNotIn("narrative_input", sent[0][1]["contents"][0]["parts"][0]["text"])
+        self.assertEqual(request_review(gc, narrative_input=None, to_rate=[]), ({}, None, []))
+        self.assertEqual(len(sent), 1)                                   # second call made no request
+
+    def test_rating_cache(self):
+        from crest.ai_ratings import RatingCache
+        with tempfile.TemporaryDirectory() as td:
+            c = RatingCache(Path(td) / "ai_ratings.json")
+            cached, todo, nodata = c.split(self.ITEMS)
+            self.assertEqual((cached, [t["symbol"] for t in todo], [t["symbol"] for t in nodata]), ({}, ["AAA", "BBB"], ["CCC"]))
+            c.store(todo, {"AAA": {"rating": "Excellent", "sentiment": "Bullish", "reason": "x"}}, "m")
+            c2 = RatingCache(Path(td) / "ai_ratings.json")
+            cached, todo, _ = c2.split(self.ITEMS)
+            self.assertEqual(list(cached), ["AAA"])
+            self.assertEqual([t["symbol"] for t in todo], ["BBB"])
+            changed = [dict(self.ITEMS[0], result="Rev +5% YoY; PAT +2% YoY")]   # new result line -> rated again
+            self.assertEqual([t["symbol"] for t in c2.split(changed)[1]], ["AAA"])
+
+    def test_auto_picks_provider_from_env(self):
+        from crest.narrative import resolve_provider_name
+        self.assertEqual(resolve_provider_name("auto", {}), "manual")
+        self.assertEqual(resolve_provider_name("auto", {"NARRATIVE_PROVIDER": "gemini"}), "manual")  # no key
+        self.assertEqual(resolve_provider_name("auto", {"NARRATIVE_PROVIDER": "Gemini", "NARRATIVE_API_KEY": "k"}), "gemini")
+        self.assertEqual(resolve_provider_name("manual", {"NARRATIVE_PROVIDER": "gemini", "NARRATIVE_API_KEY": "k"}), "manual")
+
+    def test_load_env(self):
+        from crest.util import load_env
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / ".env"
+            f.write_text('# c\nNARRATIVE_PROVIDER=gemini\nNARRATIVE_MODEL="m-1"\n\nBROKEN LINE\n', encoding="utf-8")
+            with mock.patch.dict("os.environ", {"NARRATIVE_MODEL": ""}, clear=False):
+                env = load_env(f)
+            self.assertEqual(env["NARRATIVE_PROVIDER"], "gemini")
+            self.assertEqual(env["NARRATIVE_MODEL"], "m-1")
+
+
+class SheetWriteBack(unittest.TestCase):
+    def test_writes_only_given_cells(self):
+        from crest.sheet_writeback import tag_basis, write_cells
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "u.xlsx"
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Universal"
+            ws.append(["Name", "Ticker", "Rating", "Sentiment"])
+            ws.append(["Aaa Ltd", "NSE:AAA", None, None])
+            ws.append(["Bbb Ltd", "NSE:BBB", "Good", "Bullish"])
+            ws["E2"] = "=1+1"
+            wb.save(f)
+            n = write_cells(f, "Universal", {1: {"F": "Rating Source"}, 2: {"C": "Weak", "D": "Bearish", "F": "AI · m · Q2FY27 · ab12"}})
+            self.assertEqual(n, 2)
+            ws2 = openpyxl.load_workbook(f).active
+            self.assertEqual([c.value for c in ws2[2]], ["Aaa Ltd", "NSE:AAA", "Weak", "Bearish", "=1+1", "AI · m · Q2FY27 · ab12"])
+            self.assertEqual([c.value for c in ws2[3]][:4], ["Bbb Ltd", "NSE:BBB", "Good", "Bullish"])
+            self.assertEqual(ws2["F1"].value, "Rating Source")
+            self.assertTrue(list((Path(td) / "backups").glob("u-*.xlsx")))
+            self.assertEqual(tag_basis(ws2["F2"].value), "ab12")
+            self.assertIsNone(tag_basis("CREST"))
+            self.assertIsNone(tag_basis(None))
+
+
+@needs_samples
+class GeminiOutage(unittest.TestCase):
+    def test_deck_built_when_gemini_fails(self):
+        from crest import gemini
+        env = {"NARRATIVE_PROVIDER": "gemini", "NARRATIVE_API_KEY": "fake"}
+        calls = []
+
+        def down(self_, url, body):
+            calls.append(1)
+            raise PipelineError("Gemini API error 503 (Gemini is overloaded - try again later)")
+        with tempfile.TemporaryDirectory() as td, mock.patch("crest.pipeline.load_env", return_value=env), \
+                mock.patch.object(gemini.GeminiClient, "_http_post", down):
+            res = run(**ARGS, runs_dir=td, render_png=False)
+            self.assertNotEqual(res.status, "FAILED")
+            self.assertTrue(Path(res.outputs["deck"]).exists())
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(any(c.name.startswith("Gemini request") and c.status == "WARN" for c in res.checks))
 
 
 class UniversalSchema(unittest.TestCase):
@@ -296,7 +540,11 @@ class RealUniversalSheet(unittest.TestCase):
             self.assertEqual(st["Sector sanity"], "PASS")
             self.assertEqual(st["Views filled in the Universal Sheet"], "WARN")
             ni = json.loads((res.run_dir / "outputs" / "narrative_input.json").read_text(encoding="utf-8"))
-            self.assertEqual(ni["rating_counts"]["rated"], 0)
+            # unapproved rules rate nothing; any rating shown comes from the sheet itself (typed, or saved there
+            # earlier by the Gemini step) - the real sheet is edited over time, so no fixed count
+            snap = openpyxl.load_workbook(res.outputs["excel"], data_only=True)["Universal_Snapshot"]
+            sources = {snap.cell(r, 17).value for r in range(2, snap.max_row + 1) if snap.cell(r, 11).value}
+            self.assertNotIn("rule", sources)
             self.assertEqual([g["group"] for g in ni["groups"]][0], "Banking & Financial Services")
             self.assertTrue((res.run_dir / "outputs" / "rating_preview.md").exists())
             ws = openpyxl.load_workbook(res.outputs["excel"], data_only=True)["Portfolio"]

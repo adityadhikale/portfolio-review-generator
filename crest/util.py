@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -22,6 +23,30 @@ def load_json(path: Path) -> dict:
 
 def load_settings(path: Path | None = None) -> dict:
     return load_json(path or CONFIG_DIR / "settings.json")
+
+
+def load_env(path: Path | None = None) -> dict:
+    """KEY=VALUE pairs from .env (blank lines and # comments ignored, surrounding quotes removed).
+    A variable already set in the real environment wins over the file."""
+    out: dict = {}
+    p = path or ROOT / ".env"
+    if p.exists():
+        for line in p.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+                v = v[1:-1]
+            out[k.strip()] = v
+    for k in list(out):
+        if os.environ.get(k):
+            out[k] = os.environ[k]
+    for k in ("NARRATIVE_PROVIDER", "NARRATIVE_API_KEY", "NARRATIVE_MODEL"):
+        if k not in out and os.environ.get(k):
+            out[k] = os.environ[k]
+    return out
 
 
 # --------------------------------------------------------------------------- symbols / names

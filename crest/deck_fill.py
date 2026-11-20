@@ -227,12 +227,12 @@ def fill_table_slide(slide, title: str, rows: list, dcfg: dict):
         ex, code = (h["ticker"] or ":").split(":", 1)
         write_cell(c[0], [h["display_name"], f"{ex}: {code}"], bold=True)
         write_cell(c[1], [f"{h['weight_pct']:.2f}%"])
-        write_cell(c[2], [h["result_line"] or "Not in Universal Sheet"], italic=not h["result_line"])
+        write_cell(c[2], [h["result_line"] or "Results awaited"], italic=not h["result_line"])
         if h["rating"] in RATING_FILL:
             write_cell(c[3], [h["rating"]], bold=True, color="FFFFFF", fill=RATING_FILL[h["rating"]])
         else:
             write_cell(c[3], ["n/a"], bold=True, color="FFFFFF", fill=NA_FILL)
-        write_cell(c[4], [h["management_commentary"] or "Not in Universal Sheet"], italic=not h["management_commentary"])
+        write_cell(c[4], [h["management_commentary"] or "Commentary awaited"], italic=not h["management_commentary"])
         lab, col = SENTIMENT.get(h["sentiment"], ("n/a", "7F7F7F"))
         write_cell(c[5], [lab], bold=True, color=col)
         write_cell(c[6], [h["view"] or "n/a"], bold=True)
@@ -240,7 +240,7 @@ def fill_table_slide(slide, title: str, rows: list, dcfg: dict):
 
 # --------------------------------------------------------------------------- main fill
 def fill_deck(template, out_path, *, data: dict, narrative: dict | None, period, client: str, asof: str,
-              dcfg: dict) -> dict:
+              dcfg: dict, ratings_by_ai: bool = False, price_source: str = "universal_cmp") -> dict:
     prs = Presentation(template)
     pend = dcfg["pending_marker"]
     pending, problems = [], []
@@ -342,7 +342,7 @@ def fill_deck(template, out_path, *, data: dict, narrative: dict | None, period,
         note = (f"RATINGS PENDING: none of the {data['portfolio']['equity_count']} equity holdings has a Rating yet "
                 f"({period.label} results).")
     elif rc["unrated_equities"]:
-        note += f"; {rc['unrated_equities']} equity holding(s) have no rating in the Universal Sheet"
+        note += f"; {rc['unrated_equities']} equity holding(s) not rated yet (results awaited)"
     tb = s5.shapes.add_textbox(Emu(7178040), Emu(1234440), Emu(4572000), Emu(731520))
     tb.name = "Text 8"
     tf = tb.text_frame
@@ -365,10 +365,21 @@ def fill_deck(template, out_path, *, data: dict, narrative: dict | None, period,
     for key, nm in (("slide15.panel.investment_stance", "Text 10"), ("slide15.panel.time_horizon", "Text 12"),
                     ("slide15.panel.approach", "Text 14"), ("slide15.panel.key_themes", "Text 16")):
         set_text(shape(s15, nm), val(key) or pend)
-    foot = shape(s15, "Text 17")
-    for p in foot.text_frame.paragraphs:
-        para_replace(p, "{ }", f"{client}'s")
-        para_replace(p, "[ ]/[ ]/202[]", asof)
+    # Title: the template says "Positioning for the Next 2-3 Years"; follow this review's time horizon instead.
+    t15 = get_path(nv, "slide15.title_suffix") or (
+        f"Positioning for the {get_path(nv, 'slide15.panel.time_horizon')}"
+        if get_path(nv, "slide15.panel.time_horizon") else None)
+    if t15:
+        set_text(shape(s15, "Text 1"), f"Market Outlook - {t15}")
+    # Source note: the template text (Screener, views from the client's Excel, '*' marks) does not describe
+    # how this tool works, so it is rewritten from what the run actually used.
+    rating_src = ("Rating and Sentiment from the Universal Sheet where set, otherwise derived from those results "
+                  "and the commentary" if ratings_by_ai else "Rating and Sentiment from the CREST Universal Sheet")
+    set_text(shape(s15, "Text 17"),
+             f"Company results (revenue, PAT) and management commentary from the CREST Universal Sheet for "
+             f"{period.label}. {rating_src}. Current View is CREST's own. Holdings and weights from {client}'s "
+             f"holdings statement as on {asof}; prices from "
+             f"{'the broker statement' if price_source == 'broker_ltp' else 'the CREST Universal Sheet'}.")
 
     # ---- results tables: clone the prototype per group / chunk, then drop the template table slides
     proto = prs.slides[TABLE_PROTOTYPE - 1]

@@ -22,7 +22,8 @@ def write_report(res, path: Path):
           + ("the **CMP column of the Universal Sheet**." if ps == "universal_cmp" else
              "the **LTP column of the broker holdings file**.") + " Sources are never mixed within a run.", ""]
     L += ["## Inputs", "", "| Item | Value |", "|---|---|"]
-    for k, lab in (("holdings", "Holdings file"), ("broker", "Broker config detected"), ("header_row", "Header row found"),
+    for k, lab in (("holdings", "Holdings file"), ("broker", "Broker config detected"), ("holdings_sheet", "Holdings sheet used"),
+                   ("header_row", "Header row found"),
                    ("asof_in_file", "As-on date in holdings file"), ("asof", "As-on date (--asof)"),
                    ("universal", "Universal Sheet"), ("universal_sheet", "Universal sheet used"),
                    ("universal_rows", "Universal rows"), ("template", "Template"), ("narrative_path", "narrative.json looked for at"),

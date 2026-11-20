@@ -36,6 +36,11 @@ SCHEMA = {
     "result_period": ("Q Result Period", ["Q Result Period", "Result Period", "Quarter"], False),
     "isin":       ("ISIN", ["ISIN", "ISIN Code", "ISIN No"], False),
     "alt_symbols": ("Alt Symbols", ["Alt Symbols", "Alternate Symbols", "Former Symbols"], False),
+    # Written by the tool when Gemini fills a blank Rating / Sentiment (crest/sheet_writeback.py). "AI · model ·
+    # period · basis": the rating is reused while the result line and commentary are unchanged. A Rating typed by
+    # CREST has this cell blank and always wins.
+    "rating_source": ("Rating Source", ["Rating Source"], False),
+    "rating_reason": ("Rating Reason", ["Rating Reason"], False),
 }
 QUARTERLY = ("result", "rating", "sentiment", "commentary")
 RATINGS = ["Excellent", "Good", "Average", "Weak"]
@@ -89,14 +94,43 @@ def _canon(value, allowed):
     return None  # present but not valid
 
 
+_ROWS_CACHE: dict = {}
+
+
+def _read_rows(path: Path):
+    """(sheet name, rows as lists). Reading the 5,000-row sheet takes several seconds, so the rows are kept for
+    the rest of this process (period detection, then every client) until the file changes on disk. Fresh
+    UniRow objects are still built on every load, so one client's run never affects another's."""
+    st = path.stat()
+    key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    if key not in _ROWS_CACHE:
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        ws = wb["Universal"] if "Universal" in wb.sheetnames else wb.worksheets[0]
+        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+        title = ws.title
+        wb.close()
+        _ROWS_CACHE.clear()
+        _ROWS_CACHE[key] = (title, rows)
+    title, rows = _ROWS_CACHE[key]
+    return title, [list(r) for r in rows]
+
+
+def result_periods(path: Path) -> list:
+    """Every 'Q Result Period' value in the sheet - a quick read for period detection (no full load)."""
+    _, rows = _read_rows(path)
+    aliases = {_norm(a) for a in SCHEMA["result_period"][1]}
+    for i, r in enumerate(rows[:10]):
+        nh = [_norm(c) for c in r]
+        j = next((k for k, h in enumerate(nh) if h in aliases), None)
+        if j is not None:
+            return [r2[j] for r2 in rows[i + 1:] if j < len(r2)]
+    return []
+
+
 def load_universe(path: Path) -> Universe:
     if not path.exists():
         raise PipelineError(f"Universal Sheet not found: {path}")
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    ws = wb["Universal"] if "Universal" in wb.sheetnames else wb.worksheets[0]
-    all_rows = [list(r) for r in ws.iter_rows(values_only=True)]
-    sheet = ws.title
-    wb.close()
+    sheet, all_rows = _read_rows(path)
 
     best = (0, None)
     for i, r in enumerate(all_rows[:10]):

@@ -2,8 +2,11 @@
   "price_source": "universal_cmp",
   "_price_source_options": "universal_cmp (CMP column of the Universal Sheet) | broker_ltp (LTP column of the broker file)",
 
-  "narrative_provider": "manual",
-  "_narrative_provider_options": "manual (read narrative.json you paste in). Other providers can be registered in crest/narrative.py; no network calls are made by 'manual'.",
+  "narrative_provider": "auto",
+  "_narrative_provider_options": "auto (Gemini when .env has NARRATIVE_PROVIDER=gemini and a key, else manual) | manual (only read narrative.json you paste in; no network calls) | gemini. A saved narrative.json is always reused; delete it to have Gemini write a new one.",
+  "rating_provider": "auto",
+  "_rating_provider_options": "auto (Gemini rates blank Rating/Sentiment when .env has a key, else the draft rules if approved) | gemini | rules. A value typed in the Universal Sheet always wins. Views always come from the Universal Sheet only.",
+
   "narrative_number_check": "fail",
   "narrative_allowed_numbers": [],
 

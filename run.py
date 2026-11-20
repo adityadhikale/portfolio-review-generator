@@ -40,8 +40,8 @@ def client_from_filename(p: Path) -> str:
 
 def period_from_universal(path: Path) -> str:
     """Most common 'Q Result Period' in the Universal Sheet, e.g. 'Q2 FY27' -> 'Q2FY27'."""
-    from crest.universal import load_universe
-    c = Counter(str(u.values.get("result_period") or "").replace(" ", "").upper() for u in load_universe(path).rows)
+    from crest.universal import result_periods
+    c = Counter(str(v or "").replace(" ", "").upper() for v in result_periods(path))
     c.pop("", None)
     if not c:
         raise PipelineError("The Universal Sheet has no 'Q Result Period' values, so the period is unknown. "
@@ -72,7 +72,11 @@ def run_one(client, holdings, period, a) -> bool:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Put client files in input\\ and run: python run.py")
+    # Check details contain symbols such as the Greek sigma; a redirected Windows console (cp1252) can't print them.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+    ap =argparse.ArgumentParser(description="Put client files in input\\ and run: python run.py")
     ap.add_argument("--client", help="Only for a single file: client name (default: taken from the file name)")
     ap.add_argument("--holdings", help="Only for a single file: path to the holdings file (default: every file in input\\)")
     ap.add_argument("--period", help="e.g. Q2FY27 (default: from the Universal Sheet)")

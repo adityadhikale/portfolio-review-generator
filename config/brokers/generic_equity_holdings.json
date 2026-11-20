@@ -28,5 +28,5 @@
     "invested_value": ["%", "p&l", "profit", "loss"],
     "name":           ["isin", "exchange", "code"]
   },
-  "asof_regex": "as on\\s+(\\d{2}/\\d{2}/\\d{4})"
+  "asof_regex": "as on\\s+(\\d{4}-\\d{1,2}-\\d{1,2}|\\d{1,2}[/-]\\d{1,2}[/-]\\d{4})"
 }
