@@ -25,7 +25,7 @@ from crest.deck_fill import chunk  # noqa: E402
 from crest.narrative import check_numbers, style_issues  # noqa: E402
 from crest.pipeline import run  # noqa: E402
 from crest.universal import load_universe  # noqa: E402
-from crest.util import PipelineError, normalize_symbol, parse_period, parse_ticker  # noqa: E402
+from crest.util import PipelineError, normalize_symbol, parse_period, parse_ticker, to_number  # noqa: E402
 from tools.build_holdings_template import build as build_blank_template  # noqa: E402
 
 S = ROOT / "samples"
@@ -325,29 +325,192 @@ class GeminiSingleRequest(unittest.TestCase):
             self.assertEqual(env["NARRATIVE_MODEL"], "m-1")
 
 
-class SheetWriteBack(unittest.TestCase):
-    def test_writes_only_given_cells(self):
-        from crest.sheet_writeback import tag_basis, write_cells
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "u.xlsx"
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "Universal"
-            ws.append(["Name", "Ticker", "Rating", "Sentiment"])
-            ws.append(["Aaa Ltd", "NSE:AAA", None, None])
-            ws.append(["Bbb Ltd", "NSE:BBB", "Good", "Bullish"])
-            ws["E2"] = "=1+1"
-            wb.save(f)
-            n = write_cells(f, "Universal", {1: {"F": "Rating Source"}, 2: {"C": "Weak", "D": "Bearish", "F": "AI · m · Q2FY27 · ab12"}})
-            self.assertEqual(n, 2)
-            ws2 = openpyxl.load_workbook(f).active
-            self.assertEqual([c.value for c in ws2[2]], ["Aaa Ltd", "NSE:AAA", "Weak", "Bearish", "=1+1", "AI · m · Q2FY27 · ab12"])
-            self.assertEqual([c.value for c in ws2[3]][:4], ["Bbb Ltd", "NSE:BBB", "Good", "Bullish"])
-            self.assertEqual(ws2["F1"].value, "Rating Source")
-            self.assertTrue(list((Path(td) / "backups").glob("u-*.xlsx")))
-            self.assertEqual(tag_basis(ws2["F2"].value), "ab12")
-            self.assertIsNone(tag_basis("CREST"))
-            self.assertIsNone(tag_basis(None))
+class FakeGoogle:
+    """Stands in for the Google Sheets API (AuthorizedSession): no network. Rows are served for any values read;
+    every request is recorded."""
+
+    class Resp:
+        def __init__(self, status, payload):
+            self.status_code, self._p, self.text = status, payload, json.dumps(payload)
+
+        def json(self):
+            return self._p
+
+    def __init__(self, reads, status=200, columns=26, cells=None):
+        self.reads = list(reads)          # successive answers to the full read (lists of rows)
+        self.status = status
+        self.columns = columns
+        self.cells = cells or {}          # A1 -> value, for the check before writing
+        self.calls = []
+
+    def get(self, url, timeout=None):
+        self.calls.append(("get", url, None))
+        if isinstance(self.status, Exception):
+            raise self.status
+        if self.status != 200:
+            return self.Resp(self.status, {"error": {"message": "nope"}})
+        if "values:batchGet" in url:
+            from urllib.parse import parse_qs, urlparse
+            rngs = parse_qs(urlparse(url).query)["ranges"]
+            return self.Resp(200, {"valueRanges": [{"values": [[self.cells.get(r.split("!")[1])]]} for r in rngs]})
+        if "fields=sheets.properties" in url:
+            return self.Resp(200, {"sheets": [{"properties": {"sheetId": 7, "title": "Universal",
+                                                              "gridProperties": {"columnCount": self.columns}}}]})
+        rows = self.reads.pop(0) if len(self.reads) > 1 else self.reads[0]
+        return self.Resp(200, {"values": rows})
+
+    def post(self, url, timeout=None, json=None):
+        self.calls.append(("post", url, json))
+        return self.Resp(200, {})
+
+
+class GoogleSheetSource(unittest.TestCase):
+    HDR = ["Name", "Ticker", "Sector", "Market Cap (Cr)", "CMP", "Views", "Result Line", "Rating", "Sentiment",
+           "Management Commentary", "Q Result Period"]
+    ROWS = [HDR, ["Aaa Ltd", "NSE:AAA", "Pharmaceuticals", 1200.5, 101.25, "Hold", "Rev +10% YoY", "", "", "", "Q2 FY27"],
+            ["Bbb Ltd", "BOM:540565", "Banks", "#N/A", "#N/A", "", "", "Good", "Bullish", "", "Q2 FY27"]]
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.td, True)
+
+    def _sheet(self, fake, **kw):
+        from crest.sheet_source import GoogleSheet, UniversalSheet
+        waits = []
+        g = GoogleSheet("sheet-id-123456", "Universal", session=fake, sleep=waits.append, **kw)
+        return UniversalSheet(g, self.td), waits
+
+    def test_read_and_parse(self):
+        from crest.universal import load_universe, result_periods
+        us, waits = self._sheet(FakeGoogle([self.ROWS]))
+        u = load_universe(us)
+        self.assertEqual([r.key for r in u.rows], ["AAA", "540565"])
+        self.assertEqual(u.by_key["AAA"].values["cmp"], 101.25)
+        self.assertIsNone(to_number(u.by_key["540565"].values["cmp"]))      # #N/A -> missing price
+        self.assertIs(u.origin, us)
+        self.assertEqual(u.by_key["AAA"].notes, [])          # a blank Rating / Sentiment from Google is not "invalid"
+        self.assertIsNone(us.data().rows[1][7])
+        self.assertEqual(result_periods(us), ["Q2 FY27", "Q2 FY27"])
+        self.assertEqual(len([c for c in us.source._session.calls if c[0] == "get"]), 1)   # read once
+        self.assertEqual(waits, [])
+        self.assertTrue(us.data().live)
+
+    def test_loading_read_again_once(self):
+        loading = [self.ROWS[0], self.ROWS[1][:4] + ["Loading..."] + self.ROWS[1][5:], self.ROWS[2]]
+        us, waits = self._sheet(FakeGoogle([loading, self.ROWS]))
+        self.assertEqual(us.data().rows[1][4], 101.25)
+        self.assertEqual(waits, [15.0])
+        self.assertTrue(any("Loading" in n for n in us.notes()))
+        us2, waits2 = self._sheet(FakeGoogle([loading]))               # still loading: price counts as missing
+        us2.data()
+        self.assertEqual(len(waits2), 1)
+        self.assertTrue(any(n.startswith("WARN") and "Loading" in n for n in us2.notes()))
+
+    def test_snapshot_saved_once_and_used_when_google_is_down(self):
+        us, _ = self._sheet(FakeGoogle([self.ROWS]))
+        snap = us.save_snapshot("Q2FY27")
+        self.assertEqual(snap.parent, self.td / "Q2FY27" / "snapshots")
+        us_again, _ = self._sheet(FakeGoogle([self.ROWS]))
+        self.assertEqual(us_again.save_snapshot("Q2FY27"), snap)        # same data -> same file
+        down, _ = self._sheet(FakeGoogle([], status=ConnectionError("no network")))
+        d = down.data()
+        self.assertFalse(d.live)
+        self.assertEqual((d.snapshot, d.rows[1][0]), (snap, "Aaa Ltd"))
+        self.assertIn("snapshot", d.warning)
+        from crest.sheet_source import ReadOnlySheet
+        with self.assertRaises(ReadOnlySheet):                           # a snapshot is never written back
+            down.write({2: {"H": "Good"}})
+        busy, _ = self._sheet(FakeGoogle([], status=503))
+        self.assertFalse(busy.data().live)
+
+    def test_down_without_snapshot_and_access_refused(self):
+        down, _ = self._sheet(FakeGoogle([], status=ConnectionError("no network")))
+        with self.assertRaises(PipelineError) as cm:
+            down.data()
+        self.assertIn("no saved snapshot", str(cm.exception))
+        refused, _ = self._sheet(FakeGoogle([], status=403))
+        with self.assertRaises(PipelineError) as cm:
+            refused.data()
+        self.assertIn("shared with", str(cm.exception))
+
+    def test_write_one_request_skips_moved_rows_and_widens_grid(self):
+        fake = FakeGoogle([self.ROWS], columns=11, cells={"A2": "Aaa Ltd", "A3": "Someone Else Ltd"})
+        us, _ = self._sheet(fake)
+        us.data()
+        n = us.write({1: {"L": "Rating Source"}, 2: {"H": "Good", "L": "AI · m · Q2FY27 · ab"}, 3: {"H": "Weak"}},
+                     expect={2: ("A", "Aaa Ltd"), 3: ("A", "Bbb Ltd")})
+        self.assertEqual(n, [1, 2])                                      # header + row 2; row 3 moved
+        posts = [c for c in fake.calls if c[0] == "post"]
+        self.assertEqual(posts[0][2]["requests"][0]["appendDimension"]["length"], 1)    # column L is new
+        body = posts[1][2]
+        self.assertEqual(body["valueInputOption"], "RAW")
+        self.assertEqual({d["range"]: d["values"][0][0] for d in body["data"]},
+                         {"'Universal'!L1": "Rating Source", "'Universal'!H2": "Good",
+                          "'Universal'!L2": "AI · m · Q2FY27 · ab"})
+        self.assertTrue(any("[3]" in n for n in us.notes()))
+
+    def test_local_file_is_read_only_and_source_choice(self):
+        from crest.sheet_source import GoogleSheet, LocalSheet, ReadOnlySheet, open_universal
+        self.assertIsInstance(open_universal({"UNIVERSAL_SHEET_ID": "abc"}).source, GoogleSheet)
+        self.assertIsInstance(open_universal({}).source, LocalSheet)
+        self.assertIsInstance(open_universal({"UNIVERSAL_SHEET_ID": "abc"}, local_path="x.xlsx").source, LocalSheet)
+        with self.assertRaises(ReadOnlySheet):
+            LocalSheet("x.xlsx").write({2: {"A": 1}})
+        with self.assertRaises(PipelineError) as cm:                     # no key file yet
+            open_universal({"UNIVERSAL_SHEET_ID": "abc", "GOOGLE_CREDENTIALS_FILE": str(self.td / "k.json")}).data()
+        self.assertIn("credentials file not found", str(cm.exception))
+
+    def test_pipeline_write_back(self):
+        """Gemini's ratings for blank cells go to the Google Sheet in one request; a typed rating is not touched."""
+        from types import SimpleNamespace
+        from crest.match import match_holdings
+        from crest.holdings import Holding
+        from crest.shared import RunResult, _write_back_to_sheet
+        from crest.universal import load_universe
+        fake = FakeGoogle([self.ROWS], cells={"A2": "Aaa Ltd"})
+        us, _ = self._sheet(fake)
+        uni = load_universe(us)
+        matched, _ = match_holdings([Holding("AAA", "AAA", 1, 1), Holding("540565", "540565", 1, 1)], uni)
+        a, b = matched[0].uni, matched[1].uni
+        a.rating, a.sentiment, a.rating_source = "Excellent", "Bullish", "AI (Gemini)"
+        b.rating_source = "Universal Sheet"                                   # typed in the sheet
+        cache = SimpleNamespace(data={"AAA": {"model": "m", "basis": "ab", "reason": "Strong"}},
+                                path=self.td / "ai_ratings.json")
+        res = RunResult()
+        _write_back_to_sheet(res, uni, matched, cache, parse_period("Q2FY27"))
+        body = [c for c in fake.calls if c[0] == "post" and "values:batchUpdate" in c[1]][0][2]
+        got = {d["range"]: d["values"][0][0] for d in body["data"]}
+        self.assertEqual(got["'Universal'!L1"], "Rating Source")
+        self.assertEqual((got["'Universal'!H2"], got["'Universal'!I2"], got["'Universal'!M2"]),
+                         ("Excellent", "Bullish", "Strong"))
+        self.assertEqual(got["'Universal'!L2"], "AI · m · Q2FY27 · ab")
+        self.assertFalse(any(k.endswith("3") for k in got))
+        self.assertTrue(any("Saved Gemini's Rating/Sentiment for 1" in n for n in res.notes))
+
+    def test_ai_tag(self):
+        from crest.ai_ratings import ai_tag, tag_basis
+        self.assertEqual(tag_basis(ai_tag("m", "Q2FY27", "ab12")), "ab12")
+        self.assertIsNone(tag_basis("CREST"))
+        self.assertIsNone(tag_basis(None))
+
+    @needs_samples
+    def test_run_against_google(self):
+        """A full run reading the Universal Sheet through the (fake) Google API: same result as the local file."""
+        from crest.sheet_source import GoogleSheet, UniversalSheet
+        from crest.universal import read_xlsx_rows
+        _, rows = read_xlsx_rows(UNI)
+        fake = FakeGoogle([[[c for c in r] for r in rows]])
+        us = UniversalSheet(GoogleSheet("sheet-id-123456", session=fake, sleep=lambda s: None), self.td)
+        res = run(**dict(ARGS, universal=us), runs_dir=self.td, render_png=False)
+        self.assertTrue(res.status.startswith("PASSED"), res.notes)
+        st = {c.name: c.status for c in res.checks}
+        self.assertEqual(st["Universal Sheet read live from Google"], "PASS")
+        self.assertTrue(Path(res.info["universal_snapshot"]).exists())
+        self.assertIn("Data snapshot used", (res.run_dir / "report.md").read_text(encoding="utf-8"))
+        ni = json.loads((res.run_dir / "outputs" / "narrative_input.json").read_text(encoding="utf-8"))
+        self.assertEqual(ni["rating_counts"]["rated"], 53)
+        res2 = run(**ARGS, step="portfolio", runs_dir=self.td, render_png=False)     # local file: no Google check
+        self.assertNotIn("Universal Sheet read live from Google", {c.name for c in res2.checks})
 
 
 @needs_samples

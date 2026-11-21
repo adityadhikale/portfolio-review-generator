@@ -1,6 +1,7 @@
 """Universal Sheet loader and schema validation.
 
-Schema (sheet 'Universal' or the first sheet; the header row is auto-detected in the first 10 rows):
+The rows come from Google Sheets or a local .xlsx (crest/sheet_source.py); the parsing and checks here are the same
+for both. Schema (sheet 'Universal' or the first sheet; the header row is auto-detected in the first 10 rows):
   Required : Name, Ticker, Sector, Market Cap (Cr), CMP, Views
   Quarterly: Result Line, Rating, Sentiment, Management Commentary
   Optional : Symbol, Short Name, Exchange, Instrument Type, Deck Group
@@ -36,7 +37,7 @@ SCHEMA = {
     "result_period": ("Q Result Period", ["Q Result Period", "Result Period", "Quarter"], False),
     "isin":       ("ISIN", ["ISIN", "ISIN Code", "ISIN No"], False),
     "alt_symbols": ("Alt Symbols", ["Alt Symbols", "Alternate Symbols", "Former Symbols"], False),
-    # Written by the tool when Gemini fills a blank Rating / Sentiment (crest/sheet_writeback.py). "AI · model ·
+    # Written by the tool when Gemini fills a blank Rating / Sentiment (crest/shared.py, through the Sheets API). "AI · model ·
     # period · basis": the rating is reused while the result line and commentary are unchanged. A Rating typed by
     # CREST has this cell blank and always wins.
     "rating_source": ("Rating Source", ["Rating Source"], False),
@@ -66,7 +67,7 @@ class UniRow:
 
 @dataclass
 class Universe:
-    path: Path
+    source: str              # where the rows came from (Google Sheet, snapshot or local file)
     sheet: str
     header_row: int
     headers: list
@@ -78,6 +79,7 @@ class Universe:
     duplicates: dict
     warnings: list
     by_isin: dict
+    origin: object = None    # the UniversalSheet it was read from (for writing AI results back), if any
 
 
 def _norm(h) -> str:
@@ -85,7 +87,7 @@ def _norm(h) -> str:
 
 
 def _canon(value, allowed):
-    if value is None:
+    if value is None or not str(value).strip():
         return ""
     s = re.sub(r"[^A-Za-z]+", "", str(value)).lower()
     for a in allowed:
@@ -97,8 +99,8 @@ def _canon(value, allowed):
 _ROWS_CACHE: dict = {}
 
 
-def _read_rows(path: Path):
-    """(sheet name, rows as lists). Reading the 5,000-row sheet takes several seconds, so the rows are kept for
+def read_xlsx_rows(path: Path):
+    """(sheet name, rows as lists) of a local .xlsx. Reading the 5,000-row sheet takes several seconds, so the rows are kept for
     the rest of this process (period detection, then every client) until the file changes on disk. Fresh
     UniRow objects are still built on every load, so one client's run never affects another's."""
     st = path.stat()
@@ -115,9 +117,16 @@ def _read_rows(path: Path):
     return title, [list(r) for r in rows]
 
 
-def result_periods(path: Path) -> list:
+def _sheet(src):
+    """-> (UniversalSheet, SheetData) for a UniversalSheet, or a path to a local .xlsx."""
+    from .sheet_source import LocalSheet, UniversalSheet
+    us = src if isinstance(src, UniversalSheet) else UniversalSheet(LocalSheet(Path(src)))
+    return us, us.data()
+
+
+def result_periods(src) -> list:
     """Every 'Q Result Period' value in the sheet - a quick read for period detection (no full load)."""
-    _, rows = _read_rows(path)
+    rows = _sheet(src)[1].rows
     aliases = {_norm(a) for a in SCHEMA["result_period"][1]}
     for i, r in enumerate(rows[:10]):
         nh = [_norm(c) for c in r]
@@ -127,10 +136,10 @@ def result_periods(path: Path) -> list:
     return []
 
 
-def load_universe(path: Path) -> Universe:
-    if not path.exists():
-        raise PipelineError(f"Universal Sheet not found: {path}")
-    sheet, all_rows = _read_rows(path)
+def load_universe(src) -> Universe:
+    """src: a UniversalSheet (Google, with snapshot fallback) or a path to a local .xlsx."""
+    us, d = _sheet(src)
+    sheet, all_rows, label = d.title, [list(r) for r in d.rows], d.source
 
     best = (0, None)
     for i, r in enumerate(all_rows[:10]):
@@ -157,7 +166,7 @@ def load_universe(path: Path) -> Universe:
         if missing_q:
             msg.append(f"missing quarterly result column(s): {', '.join(missing_q)} "
                        "(Result Line / Rating / Sentiment / Management Commentary feed the results-table slides)")
-        raise PipelineError(f"Universal Sheet '{path.name}' {'; '.join(msg)}. Header row {h_idx + 1}: {headers}. "
+        raise PipelineError(f"Universal Sheet ({label}) {'; '.join(msg)}. Header row {h_idx + 1}: {headers}. "
                             "See templates/Universal_Sheet_template.xlsx for the expected layout.")
 
     rows, warnings = [], []
@@ -209,7 +218,7 @@ def load_universe(path: Path) -> Universe:
             by_name.setdefault(nn, []).append(u)
     for k, rr in dups.items():
         warnings.append(f"Universal Sheet has duplicate symbol {k} on rows {rr}; matches to it are refused (ambiguous)")
-    return Universe(path, sheet, h_idx + 1, headers, col, rows, by_key, by_code, by_name, dups, warnings, by_isin)
+    return Universe(label, sheet, h_idx + 1, headers, col, rows, by_key, by_code, by_name, dups, warnings, by_isin, us)
 
 
 def alt_symbols(raw) -> list:

@@ -22,6 +22,19 @@ def rating_basis(item: dict) -> str:
     return hashlib.sha1(f"{item.get('result') or ''}\n{item.get('commentary') or ''}".encode("utf-8")).hexdigest()[:16]
 
 
+def ai_tag(model: str, period: str, basis: str) -> str:
+    """Rating Source text for a rating the tool wrote: 'AI · model · period · basis'."""
+    return f"AI · {model} · {period} · {basis}"
+
+
+def tag_basis(tag) -> str | None:
+    """The basis hash from an 'AI · model · period · basis' tag, or None when the cell is not an AI tag."""
+    s = str(tag or "").strip()
+    if not s.upper().startswith("AI"):
+        return None
+    return s.split("·")[-1].strip() if "·" in s else ""
+
+
 def canon(v, allowed):
     s = str(v or "").strip().lower()
     return next((a for a in allowed if a.lower() == s), None)

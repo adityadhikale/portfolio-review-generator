@@ -8,8 +8,9 @@ Turns a client's holdings, entered in the standard CREST holdings template, into
   template.
 
 Numbers and structure come from plain, deterministic Python. The written commentary slides are filled from a
-`narrative.json`, which you supply or which the optional narrative API (set up in `.env`) writes; that API is the
-only network call (see [Narrative](#narrative-slides)).
+`narrative.json`, which you supply or which the optional narrative API (set up in `.env`) writes (see
+[Narrative](#narrative-slides)). The Universal Sheet is read from Google Sheets (see
+[Google Sheets setup](#google-sheets-setup)), or from a local file until that is set up.
 
 ---
 
@@ -43,7 +44,7 @@ Every file in `input\` is processed in one go, and the tool works the rest out:
 | Period (e.g. Q2FY27) | the Universal Sheet's `Q Result Period` column |
 | Client name | cell C2 of the holdings template |
 | As-on date | cell C3 of the holdings template |
-| Universal Sheet | `templates\universal-sheet.xlsx` |
+| Universal Sheet | the Google Sheet named in `.env` (`UNIVERSAL_SHEET_ID`); without it, `templates\universal-sheet.xlsx` |
 | Deck template | `templates\Deck_-_template.pptx` |
 
 Optional overrides: `--step`, `--holdings` (one file), `--period`, `--universal`, `--template`, `--narrative`,
@@ -75,7 +76,7 @@ A run has two steps, which can also be run on their own, so a deck can be made w
 
 ## Requirements
 
-* Python 3.11+ and `pip install -r requirements.txt` (openpyxl, python-pptx, pymupdf).
+* Python 3.11+ and `pip install -r requirements.txt` (openpyxl, python-pptx, pymupdf, google-auth, requests).
 * **LibreOffice** (for formula checks and the PDF / slide render): `winget install TheDocumentFoundation.LibreOffice`.
   Without it the run still completes; report.md says which checks were skipped. A non-standard install path can be
   set in `config/settings.json` → `libreoffice_path`.
@@ -88,8 +89,9 @@ Client data and CREST research never go to GitHub; `.gitignore` excludes them. A
 
 | File | Purpose |
 |---|---|
-| `templates/universal-sheet.xlsx` | The live Universal Sheet (all stocks, results, views); backups the tool makes before writing to it go to `templates/backups/` |
-| `.env` | narrative API key and models (copy `.env.example`) |
+| `secrets/google-service-account.json` | The Google service-account key (see [Google Sheets setup](#google-sheets-setup)) |
+| `.env` | Google Sheet ID, narrative API key and models (copy `.env.example`) |
+| `templates/universal-sheet.xlsx` | Local copy of the Universal Sheet: offline fallback until Google Sheets is set up, and for tests. Never written by the tool |
 | `templates/Deck_-_template.pptx` | The CREST deck template |
 | `input/*` | Filled holdings templates (client data) |
 | `samples/holdings.xlsx`, `samples/reference_portfolio.xlsx`, `samples/reference_deck_Q1FY27.pptx` | Reference files, only needed for the end-to-end tests (the tests copy the broker sample into the holdings template) |
@@ -114,7 +116,7 @@ crest/                     the pipeline
   narrative_api.py         narrative API client (model list, switching on busy / bad replies)
   ai_review.py             the single API request per client: ratings + narrative
   ai_ratings.py            per-quarter backup of API ratings (runs/<period>/ai_ratings.json)
-  sheet_writeback.py       writes API ratings into the Universal Sheet without touching other cells
+  sheet_source.py          Universal Sheet source: Google Sheets API (read, write-back) or local file; snapshots
   deck_data.py             numbers for the deck, read back from the Excel
   narrative.py             narrative template, saved narrative.json, number and style checks
   deck_fill.py             fills the PowerPoint template
@@ -198,8 +200,52 @@ Blank layout with a column guide: `templates/Universal_Sheet_template.xlsx` (Leg
 | Short Name, Deck Group, Exchange, Instrument Type | optional | display name, group override, ETF flag (`Sector = ETF` also works) |
 | Rating Source, Rating Reason | written by the tool | added when the narrative API fills a blank Rating / Sentiment (source, period and a change code); leave blank for ratings you type |
 
-Formula cells (e.g. GOOGLEFINANCE) are read using the value saved in the file. A `#N/A` price sends that stock to
-Exceptions.
+**Where it is read from.** The Universal Sheet lives in Google Sheets, where GOOGLEFINANCE keeps price and market cap
+live. Each batch of runs reads the whole tab in one request, so every client in the batch, and both steps of a run,
+use the same data. Cells still showing `Loading...` are read once more after 15 seconds; a price still `#N/A`,
+`Loading...` or blank sends that stock to Exceptions as "Missing price".
+
+**Snapshots.** Every run saves the data it used in `runs\<period>\snapshots\` (compressed, about 250 KB; a new file
+only when the data changed) and `report.md` names it. If Google cannot be reached, the latest snapshot is used
+instead and the run shows a WARN check, "Universal Sheet read live from Google". If Google refuses access (sheet not
+shared, wrong ID or tab name), the run stops with the reason.
+
+**Writing back.** Ratings from the narrative API are written to the Google Sheet in one request: Rating, Sentiment,
+Rating Source and Rating Reason, only for stocks whose Rating and Sentiment were blank. Just before writing, the
+tool checks each target row still holds the same company (in case rows were inserted or sorted meanwhile) and skips
+any row that moved. Nothing is written when the run used a snapshot or the local file; the ratings stay in
+`runs\<period>\ai_ratings.json` and are written on the next run that reads the Google Sheet.
+
+**Local file.** With no `UNIVERSAL_SHEET_ID` in `.env`, or with `--universal <file.xlsx>`, the tool reads
+`templates\universal-sheet.xlsx` (values saved in the file) and never writes to it.
+
+## Google Sheets setup
+
+Done once by CREST. The key file is a password: never paste it into a chat or an email, and never commit it.
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com), sign in with the CREST Google account, and
+   create a project (e.g. "CREST Portfolio Review").
+2. In that project, open **APIs & Services → Library**, search for **Google Sheets API**, and click **Enable**.
+3. Open **IAM & Admin → Service Accounts → Create service account**. Name it (e.g. `crest-portfolio`), skip the
+   optional role and user steps, and click **Done**. Copy its email address (it ends in `.iam.gserviceaccount.com`).
+4. Click the service account, open **Keys → Add key → Create new key → JSON**. A `.json` file downloads. Save it in
+   this project as `secrets\google-service-account.json` (create the `secrets` folder; git ignores it).
+5. Upload the Universal Sheet to Google Drive and open it with Google Sheets (**File → Save as Google Sheets** if it
+   opened as an .xlsx). Check that the stocks are on a tab named `Universal` and that GOOGLEFINANCE prices show.
+6. Click **Share**, paste the service account's email, choose **Editor**, untick "Notify people", and share.
+7. Copy the sheet ID from its address, `docs.google.com/spreadsheets/d/<SHEET ID>/edit`, and put it in `.env`:
+
+   ```
+   UNIVERSAL_SHEET_ID=<SHEET ID>
+   UNIVERSAL_WORKSHEET=Universal
+   GOOGLE_CREDENTIALS_FILE=secrets/google-service-account.json
+   ```
+
+8. Check it: `python run.py --step portfolio` prints `Universal Sheet: Google Sheet ...`, and `report.md` shows
+   "Universal Sheet read live from Google: PASS".
+
+Tip: test the write-back on a **copy** of the sheet first (share the copy the same way and put the copy's ID in
+`.env`), then switch the ID to the real sheet.
 
 ## Rating and Sentiment rules
 
@@ -228,7 +274,7 @@ and amounts removed). Views always come from the Universal Sheet only. The API's
 Universal Sheet (Rating, Sentiment, and
 the Rating Source / Rating Reason columns) and kept as a backup in `runs/<period>/ai_ratings.json`; every later run,
 for any client, reads them from there and sends no request for those stocks. A stock is rated again only when its
-result line or commentary changes. If the sheet is open in Excel the write waits for a later run. The narrative is
+result line or commentary changes. If the run could not write to the Google Sheet, the next one that can does. The narrative is
 saved in `runs/<period>/<client>/narrative.json` and reused. Edit the sheet or that file to correct anything;
 delete the narrative (or a stock's Rating Source) to have it written again. There are no automatic
 correction requests: if the narrative fails a check, the run names the field to edit. If a model is busy, gives

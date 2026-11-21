@@ -24,7 +24,8 @@ def write_report(res, path: Path):
     L += ["## Inputs", "", "| Item | Value |", "|---|---|"]
     for k, lab in (("holdings", "Holdings file"), ("holdings_kind", "Holdings file type"),
                    ("holdings_sheet", "Holdings sheet used"), ("client", "Client name"), ("asof", "As-on date"),
-                   ("universal", "Universal Sheet"), ("universal_sheet", "Universal sheet used"),
+                   ("universal", "Universal Sheet"), ("universal_read_at", "Universal Sheet read at"),
+                   ("universal_snapshot", "Data snapshot used"), ("universal_sheet", "Universal sheet used"),
                    ("universal_rows", "Universal rows"), ("template", "Template"), ("narrative_path", "narrative.json looked for at"),
                    ("libreoffice", "LibreOffice"), ("excel_cached_values", "Excel cached values")):
         if k in i:

@@ -10,11 +10,11 @@ from openpyxl.utils import get_column_letter
 
 from . import deck_data as dd
 from . import validate as V
-from .ai_ratings import RatingCache, rating_basis
+from .ai_ratings import RatingCache, ai_tag, rating_basis, tag_basis
 from .match import match_holdings
 from .narrative_api import resolve_ai
 from .ratings import RatingRules
-from .sheet_writeback import ai_tag, tag_basis, write_cells
+from .sheet_source import ReadOnlySheet
 from .universal import load_universe, value_number
 from .util import CONFIG_DIR, ROOT, PipelineError, load_env, load_json, normalize_name
 
@@ -50,7 +50,7 @@ class Ctx:
     per: object
     client: str
     asof: str
-    universal: Path
+    universal: object            # UniversalSheet (crest/sheet_source.py)
     template: Path | None
     narrative_path: Path
     hf: object                   # HoldingsFile (from a template or a Portfolio Excel)
@@ -325,23 +325,26 @@ def _write_back_to_sheet(res, uni, matched, cache, per):
     src_i = ci.get("rating_source", last + 1)
     rsn_i = ci.get("rating_reason", max(last, src_i) + 1)
     L = lambda i: get_column_letter(i + 1)  # noqa: E731
-    updates = {}
+    updates, expect = {}, {}
     if "rating_source" not in ci or "rating_reason" not in ci:
         updates[uni.header_row] = {L(src_i): "Rating Source", L(rsn_i): "Rating Reason"}
     for m in todo:
+        expect[m.uni.row] = (L(ci["name"]), m.uni.values.get("name"))   # skip the row if the sheet moved since
         e = cache.data[m.uni.key]
         updates[m.uni.row] = {L(ci["rating"]): m.uni.rating, L(ci["sentiment"]): m.uni.sentiment,
                               L(src_i): ai_tag(e.get("model", "gemini"), per.compact, e.get("basis", "")),
                               L(rsn_i): e.get("reason", "")}
+    if uni.origin is None:
+        return
     try:
-        n = write_cells(uni.path, uni.sheet, updates)
-        res.notes.append(f"Saved Gemini's Rating/Sentiment for {len(todo)} stock(s) into the Universal Sheet "
-                         f"({uni.path.name}: Rating, Sentiment, Rating Source, Rating Reason; {n} row(s); backup in "
-                         f"{uni.path.parent.name}/backups) - next runs read them from the sheet")
-    except PermissionError:
-        res.notes.append(f"WARN: the Universal Sheet is open in another program, so Gemini's ratings were not written "
-                         f"into it; they are kept in {cache.path.name} (no new request) and will be written on a run "
-                         "when the sheet is closed")
+        n = len([r for r in uni.origin.write(updates, expect) if r != uni.header_row])
+        res.notes += [n_ for n_ in uni.origin.notes() if n_ not in res.notes]
+        res.notes.append(f"Saved Gemini's Rating/Sentiment for {n} stock(s) into the Universal Sheet ({uni.source}: "
+                         "Rating, Sentiment, Rating Source, Rating Reason) - next runs read them from the sheet")
+    except ReadOnlySheet as e:
+        res.notes.append(f"Gemini's ratings for {len(todo)} stock(s) were not written into the Universal Sheet ({e}); "
+                         f"they are kept in {cache.path.name} (no new request) and are written on the next run that "
+                         "reads the Google Sheet")
     except Exception as e:  # noqa: BLE001 - never lose a run over the write-back
         res.notes.append(f"WARN: could not write Gemini's ratings into the Universal Sheet ({e}); they are kept in "
                          f"{cache.path.name}")

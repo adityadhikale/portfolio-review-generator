@@ -13,7 +13,9 @@ from pathlib import Path
 
 from .holdings import read_template
 from .portfolio_reader import file_kind, read_portfolio_excel
+from . import validate as V
 from .shared import Ctx, RunResult, prepare
+from .sheet_source import LocalSheet, UniversalSheet
 from .step_deck import build_deck
 from .step_portfolio import build_portfolio
 from .util import CONFIG_DIR, ROOT, PipelineError, load_json, parse_period, safe_filename
@@ -50,16 +52,22 @@ def read_holdings(path: Path, step: str):
 def run(*, period, universal, holdings, template=None, narrative=None, runs_dir=None, settings_path=None,
         render_png=True, publish_dir=None, step="both") -> RunResult:
     """holdings: a filled holdings template, or (step 'deck' only) a Portfolio Excel built by Step A. The client
-    name and the as-on date are read from it; prices always come from the Universal Sheet."""
+    name and the as-on date are read from it; prices always come from the Universal Sheet.
+    universal: a UniversalSheet (crest/sheet_source.py: Google Sheets with snapshot fallback; pass the same one to
+    every run of a batch so all of them use one read), or a path to a local .xlsx."""
     if step not in STEPS:
         raise PipelineError(f"step must be one of {', '.join(STEPS)}, got '{step}'")
     settings = load_json(Path(settings_path) if settings_path else CONFIG_DIR / "settings.json")
     per = parse_period(period)
-    universal, holdings = Path(universal), Path(holdings)
+    if not isinstance(universal, UniversalSheet):
+        if not Path(universal).exists():
+            raise PipelineError(f"Input file not found: {universal}")
+        universal = UniversalSheet(LocalSheet(universal), runs_dir)
+    holdings = Path(holdings)
     template = Path(template) if template else None
     if step != "portfolio" and template is None:
         raise PipelineError("The deck template is needed to make the deck.")
-    used = [universal, holdings] + ([template] if step != "portfolio" else [])
+    used = [holdings] + ([template] if step != "portfolio" else [])
     for p in used:
         if not p.exists():
             raise PipelineError(f"Input file not found: {p}")
@@ -71,7 +79,7 @@ def run(*, period, universal, holdings, template=None, narrative=None, runs_dir=
     for p in used:
         shutil.copy2(p, run_dir / "inputs" / p.name)
     narrative_path = Path(narrative) if narrative else run_dir / "narrative.json"
-    res.info.update(step=step, client=hf.client, period=per.label, asof=hf.asof, universal=universal.name,
+    res.info.update(step=step, client=hf.client, period=per.label, asof=hf.asof, universal=universal.label,
                     holdings=holdings.name,
                     holdings_kind="Portfolio Excel" if kind == "portfolio" else "holdings template",
                     started=datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
@@ -81,6 +89,7 @@ def run(*, period, universal, holdings, template=None, narrative=None, runs_dir=
               template=template, narrative_path=narrative_path, hf=hf, out=out, render_png=render_png)
     current = "shared"
     try:
+        _universal_info(res, universal, per)
         prepare(ctx)
         _tag(res, current)
         excel_vals = None
@@ -105,6 +114,20 @@ def run(*, period, universal, holdings, template=None, narrative=None, runs_dir=
             write_report(res, run_dir / "report.md")  # add the locked-file note
             shutil.copy2(run_dir / "report.md", res.outputs["published_to"] / "report.md")
     return res
+
+
+def _universal_info(res, us: UniversalSheet, per):
+    """Read the Universal Sheet (once per batch), save the snapshot this run used, and say where the data came from."""
+    d = us.data()
+    snap = us.save_snapshot(per.compact)
+    res.info.update(universal=d.source, universal_read_at=d.read_at, universal_snapshot=str(snap))
+    for n in us.notes():
+        if n not in res.notes:
+            res.notes.append(n)
+    if d.warning:
+        res.checks.append(V.Check("Universal Sheet read live from Google", "WARN", d.warning))
+    elif d.live:
+        res.checks.append(V.Check("Universal Sheet read live from Google", "PASS", f"{d.source}, read {d.read_at}"))
 
 
 def _tag(res, step: str):

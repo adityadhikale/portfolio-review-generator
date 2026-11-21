@@ -20,7 +20,8 @@ from collections import Counter
 from pathlib import Path
 
 from crest.pipeline import run
-from crest.util import ROOT, PipelineError
+from crest.sheet_source import open_universal
+from crest.util import ROOT, PipelineError, load_env
 
 INPUT_DIR = ROOT / "input"
 OUTPUT_DIR = ROOT / "output"
@@ -33,10 +34,10 @@ def input_files() -> list[Path]:
                   if p.suffix.lower() in (".xlsx", ".xlsm") and not p.name.startswith("~$"))
 
 
-def period_from_universal(path: Path) -> str:
+def period_from_universal(universal) -> str:
     """Most common 'Q Result Period' in the Universal Sheet, e.g. 'Q2 FY27' -> 'Q2FY27'."""
     from crest.universal import result_periods
-    c = Counter(str(v or "").replace(" ", "").upper() for v in result_periods(path))
+    c = Counter(str(v or "").replace(" ", "").upper() for v in result_periods(universal))
     c.pop("", None)
     if not c:
         raise PipelineError("The Universal Sheet has no 'Q Result Period' values, so the period is unknown. "
@@ -44,10 +45,10 @@ def period_from_universal(path: Path) -> str:
     return c.most_common(1)[0][0]
 
 
-def run_one(holdings, period, a) -> bool:
+def run_one(holdings, period, a, universal) -> bool:
     print(f"\n=== {holdings.name} ===")
     try:
-        res = run(period=period, universal=a.universal, holdings=holdings, template=a.template,
+        res = run(period=period, universal=universal, holdings=holdings, template=a.template,
                   narrative=a.narrative, runs_dir=a.runs_dir, settings_path=a.settings,
                   render_png=not a.no_render, publish_dir=a.output_dir, step=a.step)
     except PipelineError as e:
@@ -77,7 +78,8 @@ def main(argv=None) -> int:
     ap.add_argument("--holdings", help="Only for a single file: path to a filled holdings template, or a "
                     "Portfolio Excel with --step deck (default: every .xlsx in input\\)")
     ap.add_argument("--period", help="e.g. Q2FY27 (default: from the Universal Sheet)")
-    ap.add_argument("--universal", default=str(DEFAULT_UNIVERSAL))
+    ap.add_argument("--universal", help="a local Universal Sheet .xlsx instead of the Google Sheet (default: the "
+                    f"Google Sheet when .env has UNIVERSAL_SHEET_ID, else {DEFAULT_UNIVERSAL.relative_to(ROOT)})")
     ap.add_argument("--template", default=str(DEFAULT_TEMPLATE))
     ap.add_argument("--narrative")
     ap.add_argument("--runs-dir")
@@ -85,8 +87,11 @@ def main(argv=None) -> int:
     ap.add_argument("--settings")
     ap.add_argument("--no-render", action="store_true")
     a = ap.parse_args(argv)
+    # One read of the Universal Sheet for the whole batch: every client and both steps use the same data.
+    universal = open_universal(load_env(), local_path=a.universal, runs_dir=a.runs_dir)
+    print(f"Universal Sheet: {universal.label}")
     try:
-        period = a.period or period_from_universal(Path(a.universal))
+        period = a.period or period_from_universal(universal)
     except PipelineError as e:
         print(f"NOT DONE: {e}")
         return 2
@@ -99,7 +104,7 @@ def main(argv=None) -> int:
                   f"The blank template is {ROOT / 'templates' / 'Holdings_Template.xlsx'}.")
             return 2
     print(f"Period {period} - {len(jobs)} file(s) - step: {a.step}")
-    results = [run_one(h, period, a) for h in jobs]
+    results = [run_one(h, period, a, universal) for h in jobs]
     print(f"\nFinished: {sum(results)} done, {len(results) - sum(results)} not done. Results are in {a.output_dir}")
     return 0 if all(results) else 2
 
