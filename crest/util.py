@@ -5,7 +5,6 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,10 +18,6 @@ class PipelineError(Exception):
 def load_json(path: Path) -> dict:
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
-
-
-def load_settings(path: Path | None = None) -> dict:
-    return load_json(path or CONFIG_DIR / "settings.json")
 
 
 def load_env(path: Path | None = None) -> dict:
@@ -137,13 +132,6 @@ def parse_period(raw: str) -> Period:
     year = fy_end_year if q == 4 else fy_end_year - 1
     mo, d = _Q_END[q]
     return Period(raw, f"Q{q} FY{fy:02d}", f"Q{q}FY{fy:02d}", f"{d} {_MONTHS[mo - 1]} {year}", True)
-
-
-def parse_asof(raw: str) -> date:
-    try:
-        return datetime.strptime(raw.strip(), "%d/%m/%Y").date()
-    except ValueError as exc:
-        raise PipelineError(f"--asof must be dd/mm/yyyy, got '{raw}'") from exc
 
 
 def safe_filename(s: str) -> str:

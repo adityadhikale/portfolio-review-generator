@@ -729,7 +729,7 @@ class AIResearch(unittest.TestCase):
         uni, matched = self._universe()
         self.assertEqual(self._run(matched, settings={"ai_research": "off"}).requests, 0)
         uni, matched = self._universe()
-        g = self._run(matched, settings={"ai_research": "gemini"},
+        g = self._run(matched, settings={"ai_research": "api_search"},
                       answer=lambda it: dict(self.GOOD, sources=[]))
         self.assertEqual(self.sent[0]["tools"], [{"google_search": {}}])       # paid key: Google Search tool
         self.assertEqual(g.searches, 0)

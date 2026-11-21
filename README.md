@@ -16,9 +16,27 @@ Numbers and structure come from plain, deterministic Python. The written comment
 
 ## Quick start
 
+Once, in the project folder: create the virtual environment and install the packages into it.
+
 ```powershell
-pip install -r requirements.txt
+python -m venv .venv
 ```
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+Every new terminal: activate it first (`.\.venv\Scripts\Activate.ps1`; the prompt shows `(.venv)`). If Windows
+refuses ("running scripts is disabled"), run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or skip
+activating and use `.\.venv\Scripts\python.exe` in place of `python`.
+
+**Website** (see [Website](#website)): `python serve.py`, then open http://localhost:8000.
+
+**Command line:**
 
 1. Copy the client's holdings into a copy of **`templates\Holdings_Template.xlsx`** (see
    [Holdings template](#holdings-template)) and save it in **`input\`**.
@@ -304,9 +322,9 @@ check flags it). Views are never touched.
 | Setting | What happens | Needs |
 |---|---|---|
 | `auto` (default) | `tavily` when `.env` has `TAVILY_API_KEY`, else `sector_only` | |
-| `tavily` | a Tavily web search per stock, then one Gemini request per batch reads the search extracts | free Gemini key + free Tavily key (1,000 searches a month, app.tavily.com) |
-| `gemini` | Gemini searches with Google Search itself | a Gemini key with billing turned on |
-| `sector_only` | blank Sectors only, no web search; results stay "Results awaited" | free Gemini key |
+| `tavily` | a Tavily web search per stock, then one narrative-API request per batch reads the search extracts | narrative API key (free tier is enough) + free Tavily key (1,000 searches a month, app.tavily.com) |
+| `api_search` | the narrative API searches the web itself | a narrative API key with billing turned on |
+| `sector_only` | blank Sectors only, no web search; results stay "Results awaited" | narrative API key |
 | `off` | nothing | |
 
 Only company names and tickers are sent, never client data.
@@ -318,7 +336,7 @@ the revenue or profit figure must appear in the cited search extracts, and every
 otherwise that value is rejected and listed in the report.
 
 **Limits.** Batches of `ai_research_batch_size` stocks (20) per request, largest holdings first, and at most
-`ai_max_requests_per_run` Gemini requests per client run (3), with one always kept for the ratings + narrative
+`ai_max_requests_per_run` narrative-API requests per client run (3), with one always kept for the ratings + narrative
 request. Stocks over the limit are researched on the next run.
 
 **Saved answers.** `runs\<period>\ai_research.json` keeps every answer: a stock's result for a quarter is never
@@ -351,9 +369,9 @@ narrative_input.json, otherwise the run fails and lists the figure.
 
 **Narrative API: narrative, Rating and Sentiment.** Copy `.env.example` to `.env` (ignored by git) and fill in
 `NARRATIVE_PROVIDER`, `NARRATIVE_API_KEY` and, optionally, `NARRATIVE_MODEL`: one model or a comma-separated list in
-order of preference (blank = the built-in list in `crest/narrative_api.py`). Each client run makes **one request**, which
-both rates the stocks whose Rating / Sentiment is blank in the Universal Sheet and writes the narrative (client name
-and amounts removed). Views always come from the Universal Sheet only. The API's ratings are written into the
+order of preference (blank = the built-in list in `crest/narrative_api.py`). After AI research (which already rates
+the stocks it researches), each deck run makes **one request** that rates the stocks still without a Rating /
+Sentiment and writes the narrative (client name and amounts removed). Views always come from the Universal Sheet only. The API's ratings are written into the
 Universal Sheet (Rating, Sentiment, and
 the Rating Source / Rating Reason columns) and kept as a backup in `runs/<period>/ai_ratings.json`; every later run,
 for any client, reads them from there and sends no request for those stocks. A stock is rated again only when its
@@ -365,6 +383,16 @@ no answer within 90 seconds, is over quota or not available for the key, the sam
 next model in the list; if all fail, the list is tried once more after 30 seconds. If no model answers, the Excel
 and deck are still built (narrative slides pending) and the next run asks again. Set `narrative_provider` and
 `rating_provider` to `"manual"` / `"rules"` in `config/settings.json` to never call the API.
+
+## Troubleshooting
+
+| What you see | What to do |
+|---|---|
+| `No module named ...`, or "A package needed to read the Google Sheet is missing" | Activate `.venv`, then `python -m pip install -r requirements.txt` |
+| The virtual environment does not start | Create it (Quick start); if scripts are refused, `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once |
+| Narrative slides say **PENDING NARRATIVE** and the report shows an API error 403 ("free tier is not available for this project") | The key's project needs billing, or use a key from a project where the free tier works; put it in `.env` and run again |
+| A run is slow at "AI research" or "Ratings and narrative" | The narrative API is busy; the tool switches models by itself. Nothing to do |
+| "Google refused access" | Share the Universal Sheet with the service account's email as Editor (see Google Sheets setup) |
 
 ## Holdings template
 

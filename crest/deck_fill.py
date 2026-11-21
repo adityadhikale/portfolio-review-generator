@@ -20,7 +20,6 @@ TEXT = "262626"
 NA_FILL = "A6A6A6"
 
 # Template slide numbers (1-based) and shape names
-NARRATIVE_SLIDES = (2, 3, 4, 5, 15)
 TABLE_SLIDES = range(6, 15)
 TABLE_PROTOTYPE = 6
 

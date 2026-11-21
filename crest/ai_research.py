@@ -10,7 +10,8 @@ Which cells
 How (config/settings.json "ai_research")
   tavily      a Tavily web search per stock (.env TAVILY_API_KEY), then one Gemini request per batch of
               ~10 stocks reads the search extracts. Works with a free Gemini key.
-  gemini      one Gemini request per batch with Google Search turned on (needs a paid Gemini key).
+  api_search  one request per batch with the narrative API's own web search turned on (needs a paid key;
+              "gemini" is accepted as the same).
   sector_only no web search: Gemini fills blank Sectors only; results stay "Results awaited".
   auto        tavily when TAVILY_API_KEY is set, else sector_only.   off: nothing.
 
@@ -299,6 +300,8 @@ def research(*, matched, per, settings, env, cache_path: Path, budget: int, post
         return out
     if mode == "auto":
         mode = "tavily" if env.get("TAVILY_API_KEY") else "sector_only"
+    if mode == "api_search":
+        mode = "gemini"
     if mode == "tavily" and not env.get("TAVILY_API_KEY"):
         out.notes.append("WARN: ai_research is 'tavily' but .env has no TAVILY_API_KEY - filling Sector only")
         mode = "sector_only"

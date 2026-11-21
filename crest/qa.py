@@ -22,7 +22,7 @@ def _texts(prs):
                         yield i, s, (ri, ci), c.text_frame
 
 
-def placeholders(prs, pending_marker: str) -> list:
+def placeholders(prs) -> list:
     out = []
     for i, s, cell, tf in _texts(prs):
         for p in tf.paragraphs:
@@ -109,7 +109,7 @@ def layout_footer(prs, client: str, period_label: str) -> list:
 
 def run_qa(pptx_path: Path, marker: str, client: str = "", period_label: str = "") -> dict:
     prs = Presentation(pptx_path)
-    return {"placeholders": placeholders(prs, marker) + layout_footer(prs, client, period_label),
+    return {"placeholders": placeholders(prs) + layout_footer(prs, client, period_label),
             "pending": pending(prs, marker), "style": style(prs),
             "overflow": overflow(prs), "slide_count": len(prs.slides)}
 

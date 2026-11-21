@@ -22,7 +22,6 @@ from .universal import value_number
 
 FONT = "Arial"
 INR = '#,##0.00;[Red]-#,##0.00'  # amounts: no currency symbol
-INR0 = '#,##0;[Red]-#,##0'
 PCT = '0.00%;[Red]-0.00%'
 QTY = '#,##0.##'
 MCAP = '#,##0.00'

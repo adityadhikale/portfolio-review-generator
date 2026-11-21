@@ -25,7 +25,7 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils import column_index_from_string
 
 from .util import ROOT, PipelineError
 
@@ -99,7 +99,11 @@ class GoogleSheet:
                 from google.auth.transport.requests import AuthorizedSession
                 from google.oauth2.service_account import Credentials
             except ImportError as e:
-                raise PipelineError("The google-auth package is missing: run  pip install -r requirements.txt") from e
+                import sys
+                raise PipelineError(
+                    f"A package needed to read the Google Sheet is missing for the Python running this tool "
+                    f"({sys.executable}): {e}. Install the packages into that Python with this command, then run "
+                    f"again:   {Path(sys.executable).name} -m pip install -r requirements.txt") from e
             try:
                 creds = Credentials.from_service_account_file(str(self.credentials_file), scopes=SCOPES)
             except (ValueError, KeyError) as e:
@@ -298,6 +302,3 @@ def open_universal(env: dict, local_path=None, runs_dir=None, **google_kw) -> Un
         src = LocalSheet(local_path or ROOT / "templates" / "universal-sheet.xlsx")
     return UniversalSheet(src, runs_dir)
 
-
-def col_letter(i0: int) -> str:
-    return get_column_letter(i0 + 1)
