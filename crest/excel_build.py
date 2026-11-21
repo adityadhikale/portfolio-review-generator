@@ -32,6 +32,7 @@ THIN = Side(style="thin", color="D9D9D9")
 BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 FIRST_DATA_ROW = 9
+MARKER_CELL, MARKER = "A1", "CREST Portfolio v1"  # hidden (column A): tells Step B this is a Portfolio Excel
 HEADER_ROW = 8
 PORTFOLIO_COLS = ["Key", "Name", "Ticker", "Sector", "Market Cap (Cr)", "Quantity Available", "Average Price",
                   "Invested Value", "CMP", "Current Value", "Unrealized P&L", "Unrealized P&L (%)",
@@ -154,6 +155,7 @@ def build_workbook(path: Path, *, client: str, asof: str, period_label: str, par
     n = len(priced)
     first, last = FIRST_DATA_ROW, FIRST_DATA_ROW + max(n, 1) - 1
     total = last + 1
+    ws[MARKER_CELL] = MARKER
     ws["B2"] = "Summary"
     ws["B2"].font = Font(name=FONT, bold=True, size=12)
     labels = [("Invested Value", f"=SUM(H{first}:H{last})", INR),

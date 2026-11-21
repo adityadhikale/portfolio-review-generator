@@ -48,6 +48,9 @@ class HoldingsFile:
     raw_rows: list[list]               # the sheet, cell values, unchanged
     holdings: list[Holding]
     notes: list[str]
+    # Portfolio Excel only: every holding Step A had (Key -> company name), to spot holdings no longer in the
+    # Portfolio sheet once matching is done
+    step_a_holdings: dict[str, str] | None = None
 
 
 def _norm(v) -> str:
@@ -58,20 +61,58 @@ def _blank(v) -> bool:
     return v is None or str(v).strip() == ""
 
 
-def _asof(v, errors: list[str]) -> str | None:
+def parse_date_cell(v, cell: str, errors: list[str]) -> str | None:
+    """A date cell (real date, or text dd/mm/yyyy) -> 'dd/mm/yyyy'; problems go to errors naming the cell."""
     if isinstance(v, datetime):
         return v.strftime("%d/%m/%Y")
     if isinstance(v, date):
         return v.strftime("%d/%m/%Y")
     if _blank(v):
-        errors.append(f"Cell {ASOF_CELL}: the as-on date is blank. Type the date of the holdings (dd/mm/yyyy).")
+        errors.append(f"Cell {cell}: the as-on date is blank. Type the date of the holdings (dd/mm/yyyy).")
         return None
     s = str(v).strip()
     try:
         return datetime.strptime(s, "%d/%m/%Y").strftime("%d/%m/%Y")
     except ValueError:
-        errors.append(f"Cell {ASOF_CELL}: '{s}' is not a date. Type it as dd/mm/yyyy, e.g. 08/10/2026.")
+        errors.append(f"Cell {cell}: '{s}' is not a date. Type it as dd/mm/yyyy, e.g. 08/10/2026.")
         return None
+
+
+def positive(v, cell: str, label: str, errors: list[str]) -> float | None:
+    """A number above 0, else an error naming the cell."""
+    n = None if isinstance(v, bool) else to_number(v)
+    if n is None or n <= 0:
+        errors.append(f"Cell {cell}: {label} must be a number above 0 (found {'a blank' if _blank(v) else repr(v)}).")
+        return None
+    return n
+
+
+class Merger:
+    """Collects holdings, merging rows for the same stock (same ISIN or same symbol) at a weighted average price."""
+
+    def __init__(self, notes: list[str]):
+        self.holdings: list[Holding] = []
+        self.notes = notes
+        self._isin: dict[str, Holding] = {}
+        self._sym: dict[str, Holding] = {}
+
+    def add(self, h: Holding):
+        m = (self._isin.get(h.isin) if h.isin else None) or self._sym.get(h.symbol)
+        if m is None:
+            self.holdings.append(h)
+            m = h
+        else:
+            tot = m.quantity + h.quantity
+            m.avg_price = (m.quantity * m.avg_price + h.quantity * h.avg_price) / tot
+            m.quantity = tot
+            m.source_rows += h.source_rows
+            m.isin = m.isin or h.isin
+            m.name = m.name or h.name
+            self.notes.append(f"Rows {m.source_rows} are the same stock ({m.raw_symbol}): merged at the weighted "
+                              "average price")
+        if h.isin:
+            self._isin[h.isin] = m
+        self._sym[h.symbol] = m
 
 
 def _pick_sheet(wb):
@@ -100,7 +141,7 @@ def read_template(path: Path) -> HoldingsFile:
     client = str(ws[CLIENT_CELL].value or "").strip()
     if not client:
         errors.append(f"Cell {CLIENT_CELL}: the client name is blank. Type the client's name.")
-    asof = _asof(ws[ASOF_CELL].value, errors)
+    asof = parse_date_cell(ws[ASOF_CELL].value, ASOF_CELL, errors)
 
     header = {_norm(c.value): c.column for c in ws[HEADER_ROW] if not _blank(c.value)}
     col: dict[str, int] = {}
@@ -114,9 +155,7 @@ def read_template(path: Path) -> HoldingsFile:
         raise PipelineError(f"{path.name} (sheet '{ws.title}'): " + " ".join(errors))
 
     L = openpyxl.utils.get_column_letter
-    merged: list[Holding] = []
-    by_isin: dict[str, Holding] = {}
-    by_sym: dict[str, Holding] = {}
+    merger = Merger(notes)
     r = FIRST_ROW
     last = ws.max_row
     while r <= last:
@@ -137,33 +176,10 @@ def read_template(path: Path) -> HoldingsFile:
         if isin and not ISIN_RE.match(isin):
             errors.append(f"Cell {cell('isin')}: '{isin}' is not an ISIN (12 characters, e.g. INE002A01018).")
             row_ok = False
-        nums = {}
-        for k in ("quantity", "avg_price"):
-            v = vals[k]
-            n = None if isinstance(v, bool) else to_number(v)
-            if n is None or n <= 0:
-                errors.append(f"Cell {cell(k)}: {COLUMNS[k]} must be a number above 0 "
-                              f"(found {'a blank' if _blank(v) else repr(v)}).")
-                row_ok = False
-            nums[k] = n
-        if row_ok:
-            h = Holding(normalize_symbol(sym or isin), sym or isin, nums["quantity"], nums["avg_price"], name, [r], isin)
-            m = (by_isin.get(isin) if isin else None) or by_sym.get(h.symbol)
-            if m is None:
-                merged.append(h)
-                m = h
-            else:
-                tot = m.quantity + h.quantity
-                m.avg_price = (m.quantity * m.avg_price + h.quantity * h.avg_price) / tot
-                m.quantity = tot
-                m.source_rows.append(r)
-                m.isin = m.isin or isin
-                m.name = m.name or name
-                notes.append(f"Rows {m.source_rows} are the same stock ({m.raw_symbol}): merged at the weighted "
-                             "average price")
-            if isin:
-                by_isin[isin] = m
-            by_sym[h.symbol] = m
+        nums = {k: positive(vals[k], cell(k), COLUMNS[k], errors) for k in ("quantity", "avg_price")}
+        if row_ok and None not in nums.values():
+            merger.add(Holding(normalize_symbol(sym or isin), sym or isin, nums["quantity"], nums["avg_price"], name,
+                               [r], isin))
         r += 1
 
     after = [i for i in range(r + 1, last + 1)
@@ -171,6 +187,7 @@ def read_template(path: Path) -> HoldingsFile:
     if after:
         notes.append(f"WARN: row {r} is blank, so the holdings end there; rows {after[0]}-{after[-1]} below it are "
                      "NOT in this review. Delete the blank row if they are holdings.")
+    merged = merger.holdings
     if not merged and not errors:
         errors.append(f"Row {FIRST_ROW}: no holdings. Enter one holding per row from row {FIRST_ROW}.")
     if errors:

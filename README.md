@@ -46,8 +46,30 @@ Every file in `input\` is processed in one go, and the tool works the rest out:
 | Universal Sheet | `templates\universal-sheet.xlsx` |
 | Deck template | `templates\Deck_-_template.pptx` |
 
-Optional overrides: `--holdings` (one file), `--period`, `--universal`, `--template`, `--narrative`, `--output-dir`,
-`--runs-dir`, `--settings`, `--no-render`.
+Optional overrides: `--step`, `--holdings` (one file), `--period`, `--universal`, `--template`, `--narrative`,
+`--output-dir`, `--runs-dir`, `--settings`, `--no-render`.
+
+### Step A and Step B
+
+A run has two steps, which can also be run on their own, so a deck can be made without making a new Excel:
+
+| Command | Input | Output |
+|---|---|---|
+| `python run.py` (or `--step both`) | holdings template | Portfolio Excel, then PPT + PDF |
+| `python run.py --step portfolio` | holdings template | Portfolio Excel (Step A) |
+| `python run.py --step deck` | Portfolio Excel, or a holdings template | PPT + PDF (Step B) |
+
+* **Step B always takes fresh data from the Universal Sheet**: price, market cap, sector, views, results,
+  commentary, rating and sentiment. Only the holdings come from the uploaded file.
+* **A Portfolio Excel edited by hand still works.** Quantity and Average Price in its Portfolio sheet win. Rows can
+  be deleted or added, columns moved, and the file can be a copy downloaded again from Google Drive (columns are
+  found by header name). A row with no Key (added by hand) is matched by its Ticker, then by its Name. Holdings that
+  Step A had but the Portfolio sheet no longer has are listed in the report.
+* A Portfolio Excel is recognised by a hidden marker in cell A1 ("CREST Portfolio v1"). It can only be used for
+  Step B; Step A always needs a holdings template.
+* A `both` run reads the Universal Sheet once, so the Excel and the deck show identical numbers.
+* A single-step run replaces only its own results in `output\<client>\<period>\`: a deck run leaves the
+  Portfolio Excel there, and a Portfolio run leaves the deck.
 
 ---
 
@@ -82,6 +104,7 @@ Client data and CREST research never go to GitHub; `.gitignore` excludes them. A
 run.py                     entry point (python run.py)
 crest/                     the pipeline
   holdings.py              reads and checks the holdings template (duplicate merge, exact-cell errors)
+  portfolio_reader.py      reads holdings back from a Portfolio Excel for Step B (columns found by header name)
   universal.py             Universal Sheet loader and schema checks
   match.py                 holdings -> Universal rows (ISIN, symbol, alt symbols, exact name)
   excel_build.py           the Portfolio workbook
@@ -96,7 +119,10 @@ crest/                     the pipeline
   narrative.py             narrative template, saved narrative.json, number and style checks
   deck_fill.py             fills the PowerPoint template
   qa.py                    deck QA (placeholders, style, overflow, render)
-  pipeline.py              runs the steps in order and archives each run
+  pipeline.py              runs shared setup, then Step A and/or Step B; archives and publishes each run
+  shared.py                shared setup: Universal Sheet, matching, ratings, deck groups, data checks, exceptions
+  step_portfolio.py        Step A: Portfolio Excel, LibreOffice cross-check, validation gate
+  step_deck.py             Step B: deck data, narrative and API request, deck, QA, PDF
   report.py                writes report.md
 config/                    settings, sector groups, sanity rules, rating rules
 templates/                 Holdings_Template.xlsx and Universal_Sheet_template.xlsx (blank, in git);
@@ -110,13 +136,14 @@ tools/                     developer helpers (holdings template, test fixtures, 
 
 ## How a run works
 
-1. **Read the holdings template** (`crest/holdings.py`): client name, as-on date and one row per holding. Rows for
-   the same stock are merged at a weighted average price. Any problem stops the run and names the cell to fix.
+1. **Read the holdings** (`crest/holdings.py`, or `crest/portfolio_reader.py` for a Portfolio Excel in Step B):
+   client name, as-on date and one row per holding. Rows for the same stock are merged at a weighted average price.
+   Any problem stops the run and names the cell to fix.
 2. **Match** each holding to the Universal Sheet: by ISIN, then symbol, then Alt Symbols (BSE codes, former symbols),
    then exact company name. Anything else goes to Exceptions; the tool never guesses.
 3. **Tickers** are written as `NSE:SYMBOL` / `BSE:CODE`. `BOM:` is rewritten as `BSE:`, and a ticker with no exchange
    defaults to NSE and is flagged.
-4. **Build the Excel**: sheets `Portfolio`, `Raw_Holdings` (the template as uploaded, unchanged), `Holdings_Normalized`,
+4. **Build the Excel** (Step A): sheets `Portfolio`, `Raw_Holdings` (the template as uploaded, unchanged), `Holdings_Normalized`,
    `Universal_Snapshot` (this client's stocks only) and `Exceptions`. The Portfolio columns are:
 
    | Column | Content |
@@ -133,26 +160,28 @@ tools/                     developer helpers (holdings template, test fixtures, 
    check copy with the run's values in their place. That copy is scanned for `#N/A`, `#REF!`, `#DIV/0!` and other errors,
    and checked against an independent Python calculation.
 5. **Validation gate**:
-   * every template holding is in the Portfolio table or in Exceptions, and the invested amounts add up;
+   * every holding is in the Portfolio table or in Exceptions, and the invested amounts add up;
    * unmatched symbols and missing prices (listed in Exceptions);
    * % Allocation = 100%;
    * sector sanity and missing sectors;
    * Universal `Q Result Period` = run period;
    * ETF market cap and ticker format.
 
-   Any FAIL stops the run with a readable report.
-6. **Deck** (`crest/deck_fill.py`):
+   Any FAIL stops the run with a readable report. A deck-only run checks the same numbers, computed in Python.
+6. **Deck** (Step B, `crest/deck_fill.py`):
    * cover, the Positive / Average / Weak counts, and results tables grouped by sector (`config/sector_groups.json`),
      sorted by weight;
    * groups over 8 rows split into (1/2), (2/2) slides; unused template slides are removed;
    * the template's footer is rewritten for the client and period.
 7. **QA**: leftover placeholders fail the run. It also checks that the brand is written CREST and that no heading
    starts with a number, estimates text overflow, and renders PDF + PNG.
-8. **Archive**: `runs/<period>/<client>/` keeps inputs, outputs, `narrative_input.json`, slide images and `report.md`.
+8. **Archive**: `runs/<period>/<client>/` keeps inputs, outputs, `narrative_input.json`, slide images and `report.md`
+   (with a checks section for each step).
    Earlier runs move to `_history/`. Results are copied to `output\<client>\<period>\`; a file there that is open in
    Excel / PowerPoint is not replaced - the new version is saved beside it as `<name> (new).<ext>`.
 
-**Pricing**: every price is the Universal Sheet CMP. The holdings template has no price column.
+**Pricing**: every price is the Universal Sheet CMP at the time of the run. Neither the holdings template nor the
+Portfolio Excel supplies prices.
 
 ---
 

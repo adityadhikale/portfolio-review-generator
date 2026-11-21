@@ -59,7 +59,7 @@ def sample_to_template():
     make_template(HOLD, rows)
 
 # Tests never call the Gemini API: ignore any real key in .env (narrative_provider 'auto' -> manual).
-_offline = mock.patch("crest.pipeline.load_env", return_value={})
+_offline = mock.patch("crest.shared.load_env", return_value={})
 
 
 def setUpModule():
@@ -360,7 +360,7 @@ class GeminiOutage(unittest.TestCase):
         def down(self_, url, body):
             calls.append(1)
             raise PipelineError("Gemini API error 503 (Gemini is overloaded - try again later)")
-        with tempfile.TemporaryDirectory() as td, mock.patch("crest.pipeline.load_env", return_value=env), \
+        with tempfile.TemporaryDirectory() as td, mock.patch("crest.shared.load_env", return_value=env), \
                 mock.patch.object(gemini.GeminiClient, "_http_post", down):
             res = run(**ARGS, runs_dir=td, render_png=False)
             self.assertNotEqual(res.status, "FAILED")
@@ -404,7 +404,7 @@ class EndToEnd(unittest.TestCase):
     def test_status_and_checks(self):
         self.assertTrue(self.res.status.startswith("PASSED"), self.res.notes)
         st = {c.name: c.status for c in self.res.checks}
-        self.assertEqual(st["Every template holding is in the Portfolio or in Exceptions"], "PASS")
+        self.assertEqual(st["Every holding is in the Portfolio or in Exceptions"], "PASS")
         self.assertEqual(st["Excel invested + Exceptions = template holdings"], "PASS")
         self.assertEqual(st["% Allocation sums to 100%"], "PASS")
         self.assertEqual(st["ETF market cap shown as 'ETF' (not #N/A)"], "PASS")
@@ -458,6 +458,193 @@ class EndToEnd(unittest.TestCase):
         for g in ni["groups"]:
             ws_ = [w[s] for s in g["symbols"]]
             self.assertEqual(ws_, sorted(ws_, reverse=True))
+
+
+def make_portfolio(path: Path, rows, headers=None, client="Sample Client", asof="08/10/2026", marker=True,
+                   normalized=None) -> Path:
+    """A Portfolio Excel shaped like Step A's: marker in A1, summary labels, headers on row 8, Total row.
+    rows: dicts keyed by header name."""
+    from crest.excel_build import MARKER, PORTFOLIO_COLS
+    headers = headers or PORTFOLIO_COLS
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Portfolio"
+    if marker:
+        ws["A1"] = MARKER
+    ws["E3"], ws["F3"], ws["E4"], ws["F4"] = "Client", client, "Data as of", asof
+    for j, h in enumerate(headers, start=1):
+        ws.cell(8, j, h)
+    for i, r in enumerate(rows):
+        for j, h in enumerate(headers, start=1):
+            ws.cell(9 + i, j, r.get(h))
+    ws.cell(9 + len(rows), headers.index("Name") + 1, "Total")
+    if normalized is not None:
+        hn = wb.create_sheet("Holdings_Normalized")
+        hn.append(["Key", "Symbol / ISIN (as typed)"])
+        for k in normalized:
+            hn.append([k, k])
+        hn.append([None, None, None, "Qty x Avg Price total"])
+    wb.save(path)
+    return path
+
+
+class PortfolioReader(unittest.TestCase):
+    """Step B reading holdings back from a Portfolio Excel (no Universal Sheet or samples needed)."""
+    ROWS = [{"Key": "ABC", "Name": "Abc Ltd", "Ticker": "NSE:ABC", "Quantity Available": 10, "Average Price": 100},
+            {"Key": "540565", "Name": "IndiGrid", "Ticker": "BSE:540565", "Quantity Available": 5, "Average Price": 120.5}]
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.td, True)
+
+    def test_kind_detection(self):
+        from crest.portfolio_reader import file_kind
+        self.assertEqual(file_kind(make_portfolio(self.td / "p.xlsx", self.ROWS)), "portfolio")
+        self.assertEqual(file_kind(make_portfolio(self.td / "old.xlsx", self.ROWS, marker=False)), "portfolio")
+        self.assertEqual(file_kind(make_template(self.td / "t.xlsx", [(None, "A", None, 1, 1)])), "template")
+
+    def test_as_built(self):
+        from crest.portfolio_reader import read_portfolio_excel
+        h = read_portfolio_excel(make_portfolio(self.td / "p.xlsx", self.ROWS, normalized=["ABC", "540565"]))
+        self.assertEqual((h.client, h.asof, h.sheet), ("Sample Client", "08/10/2026", "Portfolio"))
+        self.assertEqual([(x.symbol, x.quantity, x.avg_price) for x in h.holdings],
+                         [("ABC", 10, 100), ("540565", 5, 120.5)])
+        self.assertEqual(h.notes, [])
+
+    def test_columns_moved_key_blank_row_deleted(self):
+        from crest.portfolio_reader import read_portfolio_excel
+        headers = ["Average Price", "Quantity Available", "Views", "Name", "Ticker", "Key"]   # re-ordered
+        rows = [{"Key": "ABC", "Name": "Abc Ltd", "Quantity Available": 10, "Average Price": 100},
+                {"Key": None, "Name": "New Co Ltd", "Ticker": "NSE:NEWCO", "Quantity Available": 3, "Average Price": 9},
+                {"Key": "", "Name": "Typed Name Only", "Quantity Available": 1, "Average Price": 2}]
+        h = read_portfolio_excel(make_portfolio(self.td / "p.xlsx", rows, headers=headers,
+                                                normalized=["ABC", "540565"]))   # 540565 deleted by hand
+        self.assertEqual([x.symbol for x in h.holdings], ["ABC", "NEWCO", "TYPEDNAMEONLY"])
+        self.assertEqual(h.holdings[2].name, "Typed Name Only")
+        self.assertTrue(any("Ticker (1) or Name (1)" in n for n in h.notes))
+        self.assertEqual(set(h.step_a_holdings), {"ABC", "540565"})   # the deck run warns 540565 is gone
+
+    def test_google_drive_round_trip(self):
+        """Downloaded from Google Sheets: the date became a real date, formulas carry their values, Key blank."""
+        from datetime import datetime
+        from crest.portfolio_reader import read_portfolio_excel
+        rows = [dict(self.ROWS[0], Key=None, Ticker="NSE:ABC"), self.ROWS[1]]
+        h = read_portfolio_excel(make_portfolio(self.td / "p.xlsx", rows, asof=datetime(2026, 10, 8)))
+        self.assertEqual(h.asof, "08/10/2026")
+        self.assertEqual([x.symbol for x in h.holdings], ["ABC", "540565"])
+
+    def test_duplicate_rows_merged(self):
+        from crest.portfolio_reader import read_portfolio_excel
+        rows = self.ROWS + [{"Key": "ABC", "Name": "Abc Ltd", "Quantity Available": 30, "Average Price": 200}]
+        h = read_portfolio_excel(make_portfolio(self.td / "p.xlsx", rows))
+        self.assertAlmostEqual(h.holdings[0].quantity, 40)
+        self.assertAlmostEqual(h.holdings[0].avg_price, (10 * 100 + 30 * 200) / 40)
+
+    def test_errors_name_the_cell(self):
+        from crest.portfolio_reader import read_portfolio_excel
+        rows = [dict(self.ROWS[0], **{"Quantity Available": "ten"}), dict(self.ROWS[1], **{"Average Price": 0})]
+        with self.assertRaises(PipelineError) as cm:
+            read_portfolio_excel(make_portfolio(self.td / "p.xlsx", rows, client=" ", asof="soon"))
+        for cell in ("F9", "G10", "F3", "F4"):
+            self.assertIn(cell, str(cm.exception))
+        headers = ["Key", "Name", "Ticker", "Qty"]
+        with self.assertRaises(PipelineError) as cm:
+            read_portfolio_excel(make_portfolio(self.td / "q.xlsx", [], headers=headers))
+        self.assertIn("Quantity Available", str(cm.exception))
+
+    def test_portfolio_excel_cannot_make_a_portfolio(self):
+        from crest.pipeline import read_holdings
+        f = make_portfolio(self.td / "p.xlsx", self.ROWS)
+        with self.assertRaises(PipelineError) as cm:
+            read_holdings(f, "portfolio")
+        self.assertIn("Portfolio Excel", str(cm.exception))
+        self.assertEqual(read_holdings(f, "deck")[1], "portfolio")
+        with self.assertRaises(PipelineError):
+            run(period="Q1FY27", universal=f, holdings=f, step="nonsense")
+
+
+@needs_samples
+class Steps(unittest.TestCase):
+    """Step A and Step B run separately, and Step B reading the Portfolio Excel (as built, and edited by hand)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="crest-steps-"))
+        cls.both = run(**ARGS, runs_dir=cls.tmp / "both", render_png=False)
+        cls.xlsx = cls.tmp / "Sample Client Portfolio.xlsx"
+        shutil.copy2(cls.both.outputs["excel"], cls.xlsx)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _ni(res):
+        return json.loads((res.run_dir / "outputs" / "narrative_input.json").read_text(encoding="utf-8"))
+
+    def test_portfolio_only(self):
+        res = run(**ARGS, step="portfolio", runs_dir=self.tmp / "a", render_png=False)
+        self.assertTrue(res.status.startswith("PASSED"), res.notes)
+        self.assertIn("excel", res.outputs)
+        self.assertNotIn("deck", res.outputs)
+        self.assertTrue(all(c.step in ("Shared setup", "Step A: Portfolio") for c in res.checks))
+        rep = (res.run_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("## Checks: Step A: Portfolio", rep)
+        self.assertNotIn("## Narrative", rep)
+        ws = openpyxl.load_workbook(res.outputs["excel"])["Portfolio"]
+        self.assertEqual(ws["A1"].value, "CREST Portfolio v1")
+        self.assertTrue(ws.column_dimensions["A"].hidden)
+
+    def test_deck_from_portfolio_excel_matches_both(self):
+        res = run(**dict(ARGS, holdings=self.xlsx), step="deck", runs_dir=self.tmp / "b", render_png=False)
+        self.assertTrue(res.status.startswith("PASSED"), res.notes)
+        self.assertNotIn("excel", res.outputs)
+        self.assertEqual(res.info["holdings_kind"], "Portfolio Excel")
+        a, b = self._ni(self.both), self._ni(res)
+        self.assertEqual(a["portfolio"], b["portfolio"])
+        self.assertEqual({h["symbol"]: h["weight_pct"] for h in a["holdings"]},
+                         {h["symbol"]: h["weight_pct"] for h in b["holdings"]})
+        self.assertEqual(a["rating_counts"], b["rating_counts"])
+        self.assertTrue(Path(res.outputs["deck"]).exists())
+        self.assertIn("## Checks: Step B: Deck", (res.run_dir / "report.md").read_text(encoding="utf-8"))
+
+    def test_deck_from_template(self):
+        res = run(**ARGS, step="deck", runs_dir=self.tmp / "c", render_png=False)
+        self.assertTrue(res.status.startswith("PASSED"), res.notes)
+        self.assertEqual(self._ni(res)["portfolio"], self._ni(self.both)["portfolio"])
+
+    def test_deck_from_edited_excel(self):
+        """Staff edits: a row deleted, a quantity changed, a column moved, a row's Key cleared."""
+        f = self.tmp / "edited.xlsx"
+        wb = openpyxl.load_workbook(self.xlsx)
+        ws = wb["Portfolio"]
+        deleted = ws["A9"].value
+        ws.delete_rows(9)
+        changed = ws["A10"].value
+        ws["F10"] = ws["F10"].value * 2
+        cleared = ws["A11"].value
+        ws["A11"] = None                                  # matched again by Name
+        ws.move_range("F8:F80", cols=10)                  # Quantity Available moved to column P
+        wb.save(f)
+        res = run(**dict(ARGS, holdings=f), step="deck", runs_dir=self.tmp / "d", render_png=False)
+        self.assertTrue(res.status.startswith("PASSED"), res.notes)
+        before = {h["symbol"]: h for h in self._ni(self.both)["holdings"]}
+        after = {h["symbol"]: h for h in self._ni(res)["holdings"]}
+        self.assertNotIn(deleted, after)
+        self.assertEqual(len(after), len(before) - 1)
+        self.assertEqual(after[changed]["quantity"], before[changed]["quantity"] * 2)
+        self.assertTrue(any("Name (1)" in n for n in res.notes))
+        self.assertTrue(any(n.startswith("WARN") and deleted in n for n in res.notes))
+        cleared_name = before[cleared]["name"]
+        self.assertTrue(any(h["name"] == cleared_name for h in after.values()))
+
+    def test_deck_run_keeps_published_excel(self):
+        out = self.tmp / "out"
+        run(**ARGS, step="portfolio", runs_dir=self.tmp / "e", render_png=False, publish_dir=out)
+        run(**dict(ARGS, holdings=self.xlsx), step="deck", runs_dir=self.tmp / "e", render_png=False, publish_dir=out)
+        names = {p.suffix for p in (out / "Sample Client" / "Q1FY27").iterdir()}
+        self.assertTrue({".xlsx", ".pptx"} <= names)
+
 
 
 class Narrative(unittest.TestCase):

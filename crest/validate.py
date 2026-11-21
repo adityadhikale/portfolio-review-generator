@@ -15,6 +15,7 @@ class Check:
     status: str  # PASS | WARN | FAIL
     detail: str
     items: list = field(default_factory=list)
+    step: str = ""  # which step added it (set by the pipeline; the report groups checks by step)
 
 
 def excel_ties(excel_invested: float, exceptions_invested: float, all_holdings) -> Check:

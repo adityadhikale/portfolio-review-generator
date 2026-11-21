@@ -6,6 +6,9 @@ HOW TO USE
   2. Run:   python run.py
   3. Collect the results from  output\<client>\<period>\
 
+Each file goes through Step A (Portfolio Excel) and Step B (deck). To run one step only:
+  python run.py --step portfolio      holdings template -> Portfolio Excel
+  python run.py --step deck           Portfolio Excel (or holdings template) -> PPT + PDF
 Everything else (period, Universal Sheet, deck template) is found automatically.
 Optional overrides: python run.py --holdings file.xlsx --period Q2FY27
 """
@@ -46,7 +49,7 @@ def run_one(holdings, period, a) -> bool:
     try:
         res = run(period=period, universal=a.universal, holdings=holdings, template=a.template,
                   narrative=a.narrative, runs_dir=a.runs_dir, settings_path=a.settings,
-                  render_png=not a.no_render, publish_dir=a.output_dir)
+                  render_png=not a.no_render, publish_dir=a.output_dir, step=a.step)
     except PipelineError as e:
         print(f"  NOT DONE: {e}")
         return False
@@ -68,8 +71,11 @@ def main(argv=None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
     ap = argparse.ArgumentParser(description="Save filled holdings templates in input\\ and run: python run.py")
-    ap.add_argument("--holdings", help="Only for a single file: path to a filled holdings template "
-                    "(default: every .xlsx in input\\)")
+    ap.add_argument("--step", choices=["portfolio", "deck", "both"], default="both",
+                    help="portfolio: template -> Portfolio Excel; deck: Portfolio Excel or template -> PPT + PDF; "
+                         "both (default): template -> Excel -> PPT + PDF")
+    ap.add_argument("--holdings", help="Only for a single file: path to a filled holdings template, or a "
+                    "Portfolio Excel with --step deck (default: every .xlsx in input\\)")
     ap.add_argument("--period", help="e.g. Q2FY27 (default: from the Universal Sheet)")
     ap.add_argument("--universal", default=str(DEFAULT_UNIVERSAL))
     ap.add_argument("--template", default=str(DEFAULT_TEMPLATE))
@@ -92,7 +98,7 @@ def main(argv=None) -> int:
             print(f"Nothing to do: save each client's filled holdings template (.xlsx) in {INPUT_DIR} and run again. "
                   f"The blank template is {ROOT / 'templates' / 'Holdings_Template.xlsx'}.")
             return 2
-    print(f"Period {period} - {len(jobs)} file(s)")
+    print(f"Period {period} - {len(jobs)} file(s) - step: {a.step}")
     results = [run_one(h, period, a) for h in jobs]
     print(f"\nFinished: {sum(results)} done, {len(results) - sum(results)} not done. Results are in {a.output_dir}")
     return 0 if all(results) else 2
