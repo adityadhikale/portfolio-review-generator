@@ -627,6 +627,21 @@ class AIResearch(unittest.TestCase):
         self.assertIn("not found in the cited sources", why)
         self.assertIn("commentary has figures not in the cited sources", why)
 
+    def test_commentary_house_style(self):
+        """Amounts in Rs crore: a converted figure still matches its source; rupee sign and 'crore' are tidied;
+        lakh / million / billion left in the text is rejected."""
+        uni, matched = self._universe()
+        ext = dict(self.EXTRACT, content=self.EXTRACT["content"] + " Order inflow rose 70% to Rs 8.24 billion.")
+        self._run(matched, tavily=self._tavily([ext]), answer=lambda it: dict(
+            self.GOOD, commentary="Order inflow rose 70% YoY to ₹824 crore."))
+        a = next(m.uni for m in matched if m.uni.key == "AAA")
+        self.assertEqual(a.values["commentary"], "Order inflow rose 70% YoY to Rs 824 cr.")
+        uni, matched = self._universe()
+        (self.td / "ai_research.json").unlink()
+        out = self._run(matched, tavily=self._tavily([ext]), answer=lambda it: dict(
+            self.GOOD, commentary="Order inflow rose 70% YoY to Rs 8.24 billion."))
+        self.assertIn("house style", " ".join(w for _, w in out.skipped))
+
     def test_not_published_is_asked_again_only_after_retry_days(self):
         uni, matched = self._universe()
         out = self._run(matched, answer=lambda it: {"status": "not_published", "quarter": "Q1 FY27",

@@ -190,8 +190,12 @@ For every company in `stocks` fill only the fields listed in its `need`, and ret
   after tax, both in Rs crore (convert lakh / million if needed); *_yoy_pct = change against the same quarter last
   year, in percent. A loss is a negative pat_cr. Leave a figure null rather than guess.
 - commentary: one or two factual sentences, at most {COMMENTARY_MAX - 30} characters, on management commentary or
-  business highlights for the quarter (orders, guidance, capacity, margins, asset quality). British spelling, no
-  hype, no recommendation. Every figure in it must come from the sources.
+  business highlights for the quarter: orders and order book, guidance, capacity, margins, asset quality, launches.
+  Do not just repeat revenue and profit (the result line already has them) unless the sources hold nothing else.
+  British spelling, no hype, no recommendation. Every figure in it must come from the sources. Write every amount
+  as Rs ... cr in crore, the house style (e.g. "order book of Rs 2,100 cr"): convert lakh (/100), million (/10) and
+  billion (x100); never use the rupee sign, lakh, million or billion. Example of the style: "Order inflow rose 70%
+  YoY to Rs 824 cr; FY27 revenue guidance raised to Rs 2,900-3,000 cr."
 - sources: the numbers of the extracts you used{'' if web == 'tavily' else ' (use [] when not given numbered extracts)'}.
 allowed_sectors: {json.dumps(sectors)}"""
 
@@ -244,6 +248,12 @@ def _numbers(text: str) -> list[float]:
         except ValueError:
             pass
     return out
+
+
+def _crore_pool(nums: list[float]) -> list[float]:
+    """Source figures plus their crore equivalents, so a figure the AI converted to Rs crore (as the house style
+    asks) still counts as found: lakh / 100, million / 10, billion x 100."""
+    return nums + [n / 100 for n in nums] + [n / 10 for n in nums] + [n * 100 for n in nums]
 
 
 def _found_in(x: float, pool: list[float]) -> bool:
@@ -395,7 +405,7 @@ def _take(m, need, a, extracts, grounding, web, model, per, canon_sector, cache,
         ext = {i + 1: x for i, x in enumerate(extracts or [])}
         used = [ext[n] for n in (a.get("sources") or []) if isinstance(n, int) and n in ext]
         sources = [x["url"] for x in used]
-        pool = _numbers(" ".join(x["title"] + " " + x["text"] for x in used))
+        pool = _crore_pool(_numbers(" ".join(x["title"] + " " + x["text"] for x in used)))
     else:
         sources, pool = list(dict.fromkeys(grounding))[:5], None
     status = str(a.get("status") or "unclear").lower()
@@ -426,9 +436,14 @@ def _take(m, need, a, extracts, grounding, web, model, per, canon_sector, cache,
             _apply(u, "result", line, entry, per, out)
     if "commentary" in need:
         cm = re.sub(r"\s+", " ", str(a.get("commentary") or "")).strip()
+        cm = re.sub(r"₹\s*", "Rs ", cm)                                  # house style: Rs ... cr
+        cm = re.sub(r"(\d)\s*(?:crores?|crs?\.?)\b", r"\1 cr", cm, flags=re.I)
         if len(cm) > COMMENTARY_MAX:
             cm = ""
             out.skipped.append((sym, "commentary too long - not used"))
+        elif re.search(r"\b(?:lakhs?|lacs?|millions?|mn|billions?|bn)\b", cm, re.I):
+            cm = ""
+            out.skipped.append((sym, "commentary not in Rs crore (house style) - not used"))
         elif cm and pool is not None and not all(_found_in(x, pool) for x in _numbers(_PERIODS.sub(" ", cm)) if x >= 10):
             cm = ""
             out.skipped.append((sym, "commentary has figures not in the cited sources - not used"))
