@@ -36,17 +36,19 @@ from pathlib import Path
 
 from openpyxl.utils import get_column_letter
 
+from .ai_ratings import RatingCache, canon
 from .narrative_api import GeminiClient, resolve_ai
 from .ratings import parse_result
 from .sheet_source import ReadOnlySheet
-from .universal import value_number
+from .universal import RATINGS, SENTIMENTS, value_number
 from .util import CONFIG_DIR, PipelineError, load_json
 
 FIELDS = ("sector", "result", "commentary")
 FIELD_NAMES = {"sector": "Sector", "result": "Result Line", "commentary": "Management Commentary"}
 COMMENTARY_MAX = 280
 TAVILY_URL = "https://api.tavily.com/search"
-EXTRACT_CHARS = 900       # per search result sent to Gemini
+EXTRACT_CHARS = 600       # per search result sent to Gemini
+SECTOR_BATCH = 100        # sector-only stocks per request (tiny items, no search)
 RESULTS_PER_SEARCH = 5
 
 
@@ -197,6 +199,12 @@ For every company in `stocks` fill only the fields listed in its `need`, and ret
   billion (x100); never use the rupee sign, lakh, million or billion. Example of the style: "Order inflow rose 70%
   YoY to Rs 824 cr; FY27 revenue guidance raised to Rs 2,900-3,000 cr."
 - sources: the numbers of the extracts you used{'' if web == 'tavily' else ' (use [] when not given numbered extracts)'}.
+- rating, sentiment, rating_reason: only for companies marked "rate": true whose status is "found"; judge from the
+  figures and commentary you report, nothing else. rating = quality of THIS quarter's results, one of {RATINGS}:
+  Excellent = strong growth in both revenue and profit, or a clear turnaround; Good = solid growth, minor soft spots;
+  Average = flat or mixed, or growth offset by a meaningful concern; Weak = profit decline, a loss, margin collapse or
+  a serious problem. sentiment = the forward-looking tone, one of {SENTIMENTS}. rating_reason = one plain sentence,
+  at most 160 characters.
 allowed_sectors: {json.dumps(sectors)}"""
 
 
@@ -274,12 +282,17 @@ class Outcome:
     filled: list = field(default_factory=list)       # (key, field, value) applied this run (new or saved)
     notes: list = field(default_factory=list)
     skipped: list = field(default_factory=list)      # (symbol, why) not researched / rejected
+    rated: int = 0                                     # stocks rated in the research request itself
 
 
 def research(*, matched, per, settings, env, cache_path: Path, budget: int, post=None, tavily_post=None,
-             say=print) -> Outcome:
+             say=print, step: str = "both", rate: bool = False) -> Outcome:
     """Fill what the held stocks need (in memory, on the UniRow values), from saved answers first and then from at
-    most `budget` Gemini requests. Returns the Outcome; write_back() then saves the new values to the sheet."""
+    most `budget` Gemini requests. Returns the Outcome; write_back() then saves the new values to the sheet.
+
+    step: a Portfolio-only run fills Sector only (the Excel shows no result line or commentary), with no web search.
+    rate: also ask Rating / Sentiment for researched stocks that have none, in the same request; the answers go to
+    runs/<period>/ai_ratings.json, so the later ratings + narrative request skips them."""
     out = Outcome()
     mode = str(settings.get("ai_research", "auto")).lower()
     if mode == "off" or not resolve_ai(env):
@@ -289,6 +302,8 @@ def research(*, matched, per, settings, env, cache_path: Path, budget: int, post
     if mode == "tavily" and not env.get("TAVILY_API_KEY"):
         out.notes.append("WARN: ai_research is 'tavily' but .env has no TAVILY_API_KEY - filling Sector only")
         mode = "sector_only"
+    if step == "portfolio":
+        mode = "sector_only"           # results and commentary are only needed for the deck
     groups = load_json(CONFIG_DIR / "sector_groups.json")
     sectors = sorted(groups["sector_to_group"])
     canon_sector = {s.lower(): s for s in sectors}
@@ -326,12 +341,21 @@ def research(*, matched, per, settings, env, cache_path: Path, budget: int, post
     if not todo:
         return out
 
-    batch = max(1, int(settings.get("ai_research_batch_size", 10)))
+    batch = max(1, int(settings.get("ai_research_batch_size", 20)))
     gc = GeminiClient(api_key=env.get("NARRATIVE_API_KEY", ""), model=env.get("NARRATIVE_MODEL") or None,
                       post=post)
     searcher = TavilySearch(env["TAVILY_API_KEY"], post=tavily_post) if mode == "tavily" else None
     tav = searcher
-    batches = [todo[i:i + batch] for i in range(0, len(todo), batch)]
+    # stocks needing a web search go in batches (largest holdings first); sector-only stocks need no search and
+    # ride along in the first request, so they rarely cost a request of their own
+    searching = [t for t in todo if t[1] & {"result", "commentary"}]
+    sector_only = [t for t in todo if not t[1] & {"result", "commentary"}]
+    batches = [searching[i:i + batch] for i in range(0, len(searching), batch)]
+    if batches and sector_only:
+        batches[0] = batches[0] + sector_only[:SECTOR_BATCH]
+        sector_only = sector_only[SECTOR_BATCH:]
+    batches += [sector_only[i:i + SECTOR_BATCH] for i in range(0, len(sector_only), SECTOR_BATCH)]
+    rated, rate_items = {}, []
     for b in batches[budget:]:
         for m, _ in b:
             out.skipped.append((m.holding.raw_symbol, "not researched this run (request limit "
@@ -341,6 +365,8 @@ def research(*, matched, per, settings, env, cache_path: Path, budget: int, post
         for m, need in b:
             it = {"symbol": m.uni.key, "name": m.uni.values.get("name"), "ticker": m.uni.ticker_crest,
                   "need": sorted(need)}
+            if rate and need & {"result", "commentary"} and not (m.uni.rating and m.uni.sentiment):
+                it["rate"] = True
             if tav is not None and need & {"result", "commentary"}:
                 try:
                     found = tav.search(search_query(m.uni, per))
@@ -368,10 +394,19 @@ def research(*, matched, per, settings, env, cache_path: Path, budget: int, post
                      if c.get("web", {}).get("uri")]
         answers = {str(a.get("symbol") or "").upper(): a for a in (reply.get("stocks") or []) if isinstance(a, dict)}
         for m, need in b:
-            _take(m, need, answers.get(m.uni.key.upper()) or {}, extracts.get(m.uni.key), grounding, web, gc.model,
-                  per, canon_sector, cache, today, out)
+            a = answers.get(m.uni.key.upper()) or {}
+            _take(m, need, a, extracts.get(m.uni.key), grounding, web, gc.model, per, canon_sector, cache, today, out)
+            v = m.uni.values
+            rt, se = canon(a.get("rating"), RATINGS), canon(a.get("sentiment"), SENTIMENTS)
+            if rate and rt and se and (v.get("result") or v.get("commentary")) and not (m.uni.rating and m.uni.sentiment):
+                rated[m.uni.key] = {"rating": rt, "sentiment": se, "reason": str(a.get("rating_reason") or "").strip()}
+                rate_items.append({"symbol": m.uni.key, "name": v.get("name"), "sector": v.get("sector"),
+                                   "result": v.get("result"), "commentary": v.get("commentary")})
     out.searches = searcher.used if searcher is not None else 0
     cache.save()
+    if rated:
+        RatingCache(Path(cache_path).parent / "ai_ratings.json").store(rate_items, rated, gc.model)
+        out.rated = len(rated)
     return out
 
 

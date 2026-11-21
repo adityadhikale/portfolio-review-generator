@@ -1,7 +1,7 @@
 """Minimal Google Gemini client (REST, standard library only).
 
 Key and models come from .env: NARRATIVE_API_KEY, and NARRATIVE_MODEL as one model or a comma-separated list
-in order of preference. When a model is busy (overloaded / server error), does not answer within the timeout,
+in order of preference. When a model is busy (overloaded / server error), does not answer within the timeout (90 s),
 is over its quota, or does not exist for this key, the SAME request goes straight to the next model - no
 waiting. If every model in the list fails that way, it waits 30 seconds and tries the list once more, then
 stops with a readable message. Errors that another model would not fix (bad key, bad request) stop at once."""
@@ -84,7 +84,7 @@ def parse_models(model) -> list[str]:
 
 
 class GeminiClient:
-    def __init__(self, *, api_key: str, model=None, timeout: int = 120, post=None, sleep=time.sleep):
+    def __init__(self, *, api_key: str, model=None, timeout: int = 90, post=None, sleep=time.sleep):
         if not api_key:
             raise PipelineError("Gemini is selected but NARRATIVE_API_KEY is blank in .env.")
         self.api_key, self.models, self.timeout = api_key, parse_models(model), timeout

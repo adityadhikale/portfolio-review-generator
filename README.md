@@ -290,6 +290,12 @@ For the stocks held in the portfolio being run, the AI fills, before ratings:
 * **Result Line** and **Management Commentary** when they are blank, or were written by the AI earlier for an
   older quarter.
 
+**Keeping requests down.** A Portfolio-only run fills blank Sectors only, with no web search (the Excel shows no
+result line or commentary); results and commentary are researched only when a deck is made. Stocks that only need
+a Sector ride along in the first research request. When a researched stock has no Rating / Sentiment, the same
+request rates it, so the later ratings + narrative request covers only what is left. Everything found is written
+to the Universal Sheet and saved per quarter, so the next client holding the same stock costs nothing.
+
 A value CREST typed is never changed. A row whose typed result is for another quarter is left alone (the period
 check flags it). Views are never touched.
 
@@ -311,7 +317,7 @@ must give source links. The Result Line is built by the tool in the house format
 the revenue or profit figure must appear in the cited search extracts, and every figure in the commentary too;
 otherwise that value is rejected and listed in the report.
 
-**Limits.** Batches of `ai_research_batch_size` stocks (10) per request, largest holdings first, and at most
+**Limits.** Batches of `ai_research_batch_size` stocks (20) per request, largest holdings first, and at most
 `ai_max_requests_per_run` Gemini requests per client run (3), with one always kept for the ratings + narrative
 request. Stocks over the limit are researched on the next run.
 
@@ -355,7 +361,7 @@ result line or commentary changes. If the run could not write to the Google Shee
 saved in `runs/<period>/<client>/narrative.json` and reused. Edit the sheet or that file to correct anything;
 delete the narrative (or a stock's Rating Source) to have it written again. There are no automatic
 correction requests: if the narrative fails a check, the run names the field to edit. If a model is busy, gives
-no answer within 2 minutes, is over quota or not available for the key, the same request goes straight to the
+no answer within 90 seconds, is over quota or not available for the key, the same request goes straight to the
 next model in the list; if all fail, the list is tried once more after 30 seconds. If no model answers, the Excel
 and deck are still built (narrative slides pending) and the next run asks again. Set `narrative_provider` and
 `rating_provider` to `"manual"` / `"rules"` in `config/settings.json` to never call the API.

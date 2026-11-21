@@ -5,7 +5,7 @@
   "_ai_research_options": "auto (tavily when .env has TAVILY_API_KEY, else sector_only) | tavily (Tavily web search + Gemini reads it; free keys work) | gemini (Gemini's own Google Search; needs a paid Gemini key) | sector_only (blank Sectors only, no web search) | off. Fills blank Sector, Result Line and Management Commentary for the held stocks; never a value CREST typed.",
   "ai_max_requests_per_run": 3,
   "_ai_max_requests_per_run_note": "Gemini requests per client run, research and ratings/narrative together. One is always kept for the ratings + narrative request; research batches use the rest.",
-  "ai_research_batch_size": 10,
+  "ai_research_batch_size": 20,
   "ai_research_retry_days": 3,
   "_ai_research_retry_days_note": "A stock whose results were not out yet is searched again after this many days.",
   "rating_provider": "auto",

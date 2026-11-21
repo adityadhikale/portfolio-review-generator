@@ -106,7 +106,7 @@ def prepare(ctx: Ctx):
     # 2b. AI research: blank / out-of-date Sector, Result Line and Commentary for the held stocks (before ratings,
     # which read the result line). One request is kept back for the ratings + narrative request.
     env = load_env()
-    _research(res, settings, per, env, uni, matched)
+    _research(res, settings, per, env, uni, matched, ctx.step)
 
     # deck group per stock
     valid_groups = set(groups_cfg["group_order"])
@@ -246,12 +246,17 @@ def prepare(ctx: Ctx):
     ctx.env, ctx.ai_on, ctx.rating_cache, ctx.ai_need, ctx.ai_to_rate = env, ai_on, rating_cache, ai_need, ai_to_rate
 
 
-def _research(res, settings, per, env, uni, matched):
+def _research(res, settings, per, env, uni, matched, step):
     budget = max(0, int(settings.get("ai_max_requests_per_run", 3)) - 1)
-    out = ai_research.research(matched=matched, per=per, settings=settings, env=env,
+    rp = settings.get("rating_provider", "auto")
+    rate = step != "portfolio" and (rp == "gemini" or (rp == "auto" and resolve_ai(env)))
+    out = ai_research.research(matched=matched, per=per, settings=settings, env=env, step=step, rate=rate,
                                cache_path=res.run_dir.parent / "ai_research.json", budget=budget,
                                say=lambda t: print(t, flush=True))
     res.notes += out.notes
+    if out.rated:
+        res.notes.append(f"Rating/Sentiment for {out.rated} stock(s) given in the research request itself (no "
+                         "separate ratings request needed for them)")
     res.info["ai_research"] = {"requests": out.requests, "searches": out.searches, "filled": len(out.filled),
                                "skipped": out.skipped}
     if out.filled:

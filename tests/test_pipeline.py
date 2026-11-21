@@ -628,6 +628,42 @@ class AIResearch(unittest.TestCase):
         self.assertIn("not found in the cited sources", why)
         self.assertIn("commentary has figures not in the cited sources", why)
 
+    def test_portfolio_step_fills_sector_only(self):
+        from crest.ai_research import research
+        uni, matched = self._universe()
+        out = research(matched=matched, per=self.per, settings={}, env=self.ENV, cache_path=self.td / "r.json",
+                       budget=2, post=self._gemini(lambda it: self.GOOD), tavily_post=self._tavily(),
+                       say=lambda t: None, step="portfolio")
+        a = next(m.uni for m in matched if m.uni.key == "AAA")
+        self.assertEqual((out.requests, out.searches), (1, 0))                  # no web search for an Excel
+        self.assertEqual((a.values["sector"], a.values["result"], a.values["commentary"]), ("Pharmaceuticals", None, None))
+        self.assertNotIn("search_extracts", self.sent[0]["contents"][0]["parts"][0]["text"])
+
+    def test_ratings_come_with_the_research(self):
+        from crest.ai_ratings import RatingCache
+        from crest.ai_research import research
+        uni, matched = self._universe()
+        out = research(matched=matched, per=self.per, settings={}, env=self.ENV, cache_path=self.td / "ai_research.json",
+                       budget=2, post=self._gemini(lambda it: dict(self.GOOD, rating="excellent", sentiment="Bullish",
+                                                                  rating_reason="Revenue and profit up sharply")),
+                       tavily_post=self._tavily(), say=lambda t: None, rate=True)
+        sent = json.loads(self.sent[0]["contents"][0]["parts"][0]["text"])["stocks"]
+        self.assertTrue(next(s for s in sent if s["symbol"] == "AAA")["rate"])
+        self.assertEqual(out.rated, 1)
+        a = next(m.uni for m in matched if m.uni.key == "AAA")
+        cached, todo, _ = RatingCache(self.td / "ai_ratings.json").split(
+            [{"symbol": "AAA", "result": a.values["result"], "commentary": a.values["commentary"]}])
+        self.assertEqual((cached["AAA"]["rating"], todo), ("Excellent", []))   # the ratings request skips it
+
+    def test_sector_only_stocks_share_the_first_request(self):
+        rows = [self.HDR] + [[f"Srch{i} Ltd", f"NSE:SRCH{i}", "", 1, 200, "", "", "", "", "", ""] for i in range(3)] \
+            + [[f"Sec{i} Ltd", f"NSE:SEC{i}", "", 1, 100, "", "Rev +1% YoY", "Good", "Neutral", "typed", "Q2 FY27"]
+               for i in range(5)]
+        uni, matched = self._universe(rows=rows)
+        out = self._run(matched, answer=lambda it: {"status": "not_published", "sector": "Chemicals"})
+        self.assertEqual((out.requests, out.searches), (1, 3))                  # 8 stocks, one request
+        self.assertEqual(sum(1 for m in matched if m.uni.values["sector"] == "Chemicals"), 8)
+
     def test_commentary_house_style(self):
         """Amounts in Rs crore: a converted figure still matches its source; rupee sign and 'crore' are tidied;
         lakh / million / billion left in the text is rejected."""
