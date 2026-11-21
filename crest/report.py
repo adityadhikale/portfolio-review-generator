@@ -16,27 +16,21 @@ def write_report(res, path: Path):
     L = [f"# CREST portfolio run - {i.get('client', '')} - {i.get('period', '')}", "",
          f"**Status: {res.status}**  ", f"Run started {i.get('started', '')}, report written "
          f"{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", ""]
-    ps = i.get("price_source")
-    L += ["## Pricing", "",
-          f"**price_source = `{ps}`** - every CMP, current value, P&L and weight in this run uses "
-          + ("the **CMP column of the Universal Sheet**." if ps == "universal_cmp" else
-             "the **LTP column of the broker holdings file**.") + " Sources are never mixed within a run.", ""]
+    L += ["## Pricing", "", "Every CMP, current value, P&L and weight in this run uses the **CMP column of the "
+          "Universal Sheet**. The holdings template has no price column.", ""]
     L += ["## Inputs", "", "| Item | Value |", "|---|---|"]
-    for k, lab in (("holdings", "Holdings file"), ("broker", "Broker config detected"), ("holdings_sheet", "Holdings sheet used"),
-                   ("header_row", "Header row found"),
-                   ("asof_in_file", "As-on date in holdings file"), ("asof", "As-on date (--asof)"),
+    for k, lab in (("holdings", "Holdings template"), ("holdings_sheet", "Holdings sheet used"),
+                   ("client", "Client name (cell C2)"), ("asof", "As-on date (cell C3)"),
                    ("universal", "Universal Sheet"), ("universal_sheet", "Universal sheet used"),
                    ("universal_rows", "Universal rows"), ("template", "Template"), ("narrative_path", "narrative.json looked for at"),
                    ("libreoffice", "LibreOffice"), ("excel_cached_values", "Excel cached values")):
         if k in i:
             L.append(f"| {lab} | {_esc(i[k])} |")
-    if "column_map" in i:
-        L.append(f"| Columns used | {_esc(', '.join(f'{k} = {v}' for k, v in i['column_map'].items()))} |")
     L.append("")
     if "holdings_parsed" in i:
         mb = i.get("matched_by", {})
         n_exc = sum(1 for e in res.exceptions if e.kind in ("Unmatched", "Ambiguous"))
-        L += ["## Matching", "", f"- Holdings parsed (after merging duplicates, dropping zero-qty/footer rows): **{i['holdings_parsed']}**",
+        L += ["## Matching", "", f"- Holdings read (after merging rows for the same stock): **{i['holdings_parsed']}**",
               f"- Matched to Universal Sheet: **{sum(mb.values())}** (by ISIN {mb.get('isin', 0)}, by symbol {mb.get('symbol', 0)}, by ticker code "
               f"{mb.get('ticker code', 0)}, by exact name {mb.get('name', 0)})",
               f"- Unmatched / ambiguous: **{n_exc}**", ""]

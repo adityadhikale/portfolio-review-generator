@@ -43,12 +43,12 @@ def read_portfolio(xlsx: Path, layout) -> dict:
     return {"rows": rows, "snapshot": snap, "summary": summary}
 
 
-def python_values(priced, price_source: str) -> dict:
+def python_values(priced) -> dict:
     """Independent recomputation of what the formulas should produce (for the cross-check)."""
     out = {}
     for m in priced:
         h, u = m.holding, m.uni
-        price = h.ltp if price_source == "broker_ltp" else _num(u.values.get("cmp"))
+        price = _num(u.values.get("cmp"))
         out[h.symbol] = {"qty": h.quantity, "avg": h.avg_price, "invested": h.quantity * h.avg_price,
                          "cmp": price, "current": h.quantity * price}
     total = sum(v["current"] for v in out.values())
@@ -82,7 +82,7 @@ def compare(excel: dict, py: dict) -> list:
     return mism
 
 
-def build_deck_data(excel: dict, *, client, period, asof, price_source, group_order, unmapped_group, tail_pct, top_n):
+def build_deck_data(excel: dict, *, client, period, asof, group_order, unmapped_group, tail_pct, top_n):
     snap = excel["snapshot"]
     hold = []
     for r in excel["rows"]:
@@ -120,7 +120,7 @@ def build_deck_data(excel: dict, *, client, period, asof, price_source, group_or
     sm = excel["summary"]
     return {
         "run": {"client": client, "period": period.compact, "period_label": period.label,
-                "quarter_end": period.quarter_end, "as_of": asof, "price_source": price_source},
+                "quarter_end": period.quarter_end, "as_of": asof},
         "portfolio": {"invested_value": round(sm["invested"], 2), "present_value": round(sm["present"], 2),
                       "unrealized_pnl": round(sm["pnl"], 2), "unrealized_pnl_pct": round(sm["pnl_pct"] * 100, 2),
                       "holdings_count": len(hold), "equity_count": len(eq), "etf_count": len(hold) - len(eq),

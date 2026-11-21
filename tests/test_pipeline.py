@@ -1,7 +1,7 @@
 """Tests.  Run:  python -m unittest discover -s tests -v
 
 Unit tests always run. End-to-end tests need the private sample files, which are NOT in git (client data):
-samples/holdings.xlsx, samples/reference_portfolio.xlsx, samples/reference_deck_Q1FY27.pptx,
+samples/holdings.xlsx (a broker export, copied into the holdings template at test start), samples/reference_portfolio.xlsx, samples/reference_deck_Q1FY27.pptx,
 templates/Deck_-_template.pptx and the fixtures built from them by tools/build_fixture.py and
 tools/extract_narrative.py. Without them those tests are skipped."""
 from __future__ import annotations
@@ -20,19 +20,43 @@ from pptx import Presentation
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from crest.brokers import parse_holdings  # noqa: E402
+from crest.holdings import read_template  # noqa: E402
 from crest.deck_fill import chunk  # noqa: E402
 from crest.narrative import check_numbers, style_issues  # noqa: E402
 from crest.pipeline import run  # noqa: E402
 from crest.universal import load_universe  # noqa: E402
 from crest.util import PipelineError, normalize_symbol, parse_period, parse_ticker  # noqa: E402
+from tools.build_holdings_template import build as build_blank_template  # noqa: E402
 
 S = ROOT / "samples"
 FX = ROOT / "tests" / "fixtures"
-HOLD, TPL, UNI = S / "holdings.xlsx", ROOT / "templates" / "Deck_-_template.pptx", FX / "universal_sample.xlsx"
-ARGS = dict(client="Sample Client", period="Q1FY27", asof="08/10/2026", universal=UNI, holdings=HOLD, template=TPL)
-HAVE_SAMPLES = all(p.exists() for p in (HOLD, TPL, UNI, FX / "narrative_reference.json"))
+BROKER, TPL, UNI = S / "holdings.xlsx", ROOT / "templates" / "Deck_-_template.pptx", FX / "universal_sample.xlsx"
+HAVE_SAMPLES = all(p.exists() for p in (BROKER, TPL, UNI, FX / "narrative_reference.json"))
 needs_samples = unittest.skipUnless(HAVE_SAMPLES, "private sample files not present (not in git)")
+_TMP = Path(tempfile.mkdtemp(prefix="crest-hold-"))
+HOLD = _TMP / "Sample Client.xlsx"   # the private broker sample copied into the holdings template (setUpModule)
+ARGS = dict(period="Q1FY27", universal=UNI, holdings=HOLD, template=TPL)
+
+
+def make_template(path: Path, rows, client="Sample Client", asof="08/10/2026") -> Path:
+    """A filled holdings template: rows are (ISIN, Symbol, Company Name, Quantity, Average Price)."""
+    build_blank_template(path)
+    wb = openpyxl.load_workbook(path)
+    ws = wb["Holdings"]
+    ws["C2"], ws["C3"] = client, asof
+    for i, r in enumerate(rows):
+        for j, v in enumerate(r):
+            ws.cell(6 + i, 2 + j, v)
+    wb.save(path)
+    return path
+
+
+def sample_to_template():
+    """samples/holdings.xlsx (broker export: header on row 3, SYMBOL / QTY / AVG PRICE) -> holdings template."""
+    ws = openpyxl.load_workbook(BROKER, data_only=True).active
+    rows = [(None, r[0], None, r[1], r[3]) for r in ws.iter_rows(min_row=4, values_only=True)
+            if isinstance(r[0], str) and r[0].strip() and r[1]]
+    make_template(HOLD, rows)
 
 # Tests never call the Gemini API: ignore any real key in .env (narrative_provider 'auto' -> manual).
 _offline = mock.patch("crest.pipeline.load_env", return_value={})
@@ -40,10 +64,13 @@ _offline = mock.patch("crest.pipeline.load_env", return_value={})
 
 def setUpModule():
     _offline.start()
+    if HAVE_SAMPLES:
+        sample_to_template()
 
 
 def tearDownModule():
     _offline.stop()
+    shutil.rmtree(_TMP, ignore_errors=True)
 
 
 class Units(unittest.TestCase):
@@ -71,110 +98,91 @@ class Units(unittest.TestCase):
         self.assertEqual(chunk(13, 8, 6), [5, 4, 4])
 
 
-class BrokerAdapter(unittest.TestCase):
+class HoldingsTemplate(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.td, True)
+
+    def _err(self, f) -> str:
+        with self.assertRaises(PipelineError) as cm:
+            read_template(f)
+        return str(cm.exception)
+
+    def test_blank_template_layout(self):
+        f = build_blank_template(self.td / "blank.xlsx")
+        wb = openpyxl.load_workbook(f)
+        self.assertEqual(wb.sheetnames, ["Holdings", "How to fill"])
+        ws = wb["Holdings"]
+        self.assertEqual((ws["B2"].value, ws["B3"].value), ("Client Name", "As On Date"))
+        self.assertEqual([ws.cell(5, c).value for c in range(2, 7)],
+                         ["ISIN", "Symbol", "Company Name", "Quantity", "Average Price"])
+        self.assertIn("C2", self._err(f))          # blank client name and date stop the run
+        self.assertIn("C3", self._err(f))
+
+    def test_good_file(self):
+        from datetime import datetime
+        f = make_template(self.td / "h.xlsx", [
+            ("INE775A01035", "MOTHERSON", "Samvardhana Motherson", 6000, 95.95),
+            (None, "540565", None, "1,200", "101.5"),       # BSE code, numbers typed as text
+            ("INE048G01026", None, "Navin Fluorine", 22, 4543.51),
+        ], client="  Sharma Family ", asof=datetime(2026, 10, 7))
+        h = read_template(f)
+        self.assertEqual((h.client, h.asof, h.sheet), ("Sharma Family", "07/10/2026", "Holdings"))
+        self.assertEqual([x.symbol for x in h.holdings], ["MOTHERSON", "540565", "INE048G01026"])
+        self.assertEqual(h.holdings[1].quantity, 1200)
+        self.assertEqual(h.holdings[0].isin, "INE775A01035")
+        self.assertEqual(h.holdings[2].name, "Navin Fluorine")
+        self.assertEqual(h.raw_rows[1][2], "  Sharma Family ")    # Raw_Holdings keeps the sheet unchanged
+
+    def test_merged_duplicates(self):
+        f = make_template(self.td / "h.xlsx", [
+            (None, "ABC-EQ", None, 10, 100), ("INE000A01011", "abc", None, 30, 200),
+            ("INE000A01011", None, None, 10, 300), (None, "XYZ", None, 5, 50)])
+        h = read_template(f)
+        self.assertEqual([x.symbol for x in h.holdings], ["ABC", "XYZ"])
+        abc = h.holdings[0]
+        self.assertAlmostEqual(abc.quantity, 50)
+        self.assertAlmostEqual(abc.avg_price, (10 * 100 + 30 * 200 + 10 * 300) / 50)
+        self.assertEqual((abc.source_rows, abc.isin), ([6, 7, 8], "INE000A01011"))
+        self.assertTrue(any("merged" in n for n in h.notes))
+
+    def test_bad_numbers_and_missing_ids(self):
+        f = make_template(self.td / "h.xlsx", [
+            (None, "ABC", None, "ten", 100), (None, "DEF", None, 5, 0), (None, None, "Some Co", 5, 10),
+            ("INE12", "GHI", None, 1, 1), (None, "JKL", None, -3, None)])
+        e = self._err(f)
+        for cell in ("E6", "F7", "Row 8", "B9", "E10", "F10"):
+            self.assertIn(cell, e)
+
+    def test_missing_column(self):
+        f = make_template(self.td / "h.xlsx", [(None, "ABC", None, 1, 1)])
+        wb = openpyxl.load_workbook(f)
+        wb["Holdings"]["F5"] = "Avg Cost"
+        wb.save(f)
+        self.assertIn("'Average Price' is missing", self._err(f))
+
+    def test_bad_date_and_not_a_template(self):
+        self.assertIn("C3", self._err(make_template(self.td / "a.xlsx", [(None, "A", None, 1, 1)], asof="2026-10-07")))
+        f = self.td / "broker.xlsx"
+        wb = openpyxl.Workbook()
+        wb.active.append(["SYMBOL", "QTY", "AVG PRICE"])
+        wb.save(f)
+        self.assertIn("not a CREST holdings template", self._err(f))
+        f.with_suffix(".csv").write_text("SYMBOL,QTY\n", encoding="utf-8")
+        self.assertIn(".xlsx", self._err(f.with_suffix(".csv")))
+
+    def test_rows_after_blank_row_warned(self):
+        f = make_template(self.td / "h.xlsx", [(None, "ABC", None, 1, 1), (None, None, None, None, None),
+                                                (None, "DEF", None, 2, 2)])
+        h = read_template(f)
+        self.assertEqual([x.symbol for x in h.holdings], ["ABC"])
+        self.assertTrue(any(n.startswith("WARN") and "8" in n for n in h.notes))
+
     @needs_samples
-    def test_sample_holdings(self):
-        p = parse_holdings(HOLD)
-        self.assertEqual(p.header_row, 3)          # title row, blank row, header
-        self.assertEqual(len(p.holdings), 54)
-        self.assertEqual(p.asof_in_file, "08/10/2026")
-        self.assertEqual(len(p.dropped), 2)        # total row + count row
-
-    def test_csv_duplicates_suffix_zero_qty(self):
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "h.csv"
-            f.write_text("Client report\nSYMBOL,QTY,AVG PRICE,LTP\nABC-EQ,10,100,110\nABC,30,200,110\nXYZ,0,50,40\n,,,\nTotal,,,\n",
-                         encoding="utf-8")
-            p = parse_holdings(f)
-            self.assertEqual([h.symbol for h in p.holdings], ["ABC"])
-            self.assertAlmostEqual(p.holdings[0].quantity, 40)
-            self.assertAlmostEqual(p.holdings[0].avg_price, (10 * 100 + 30 * 200) / 40)
-            self.assertTrue(any(d["reason"] == "zero quantity" for d in p.dropped))
-
-    def test_other_layout_isin_and_broker_codes(self):
-        """ICICI-style export: broker codes instead of NSE symbols, ISIN column, header on row 1, stray cells."""
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "h.xlsx"
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.append(["Stock Symbol", "Company Name", "ISIN Code", "Qty", "Average Cost Price", "Current Market Price",
-                       "% Change over prev close", "Value At Cost", "Value At Market Price", "Unrealized Profit/Loss %"])
-            ws.append(["MOTSUM", "SAMVARDHANA MOTHERSON INT LTD", "INE775A01035", 6000, 95.95, 154.1, -3.2, 575700, 924600, 60.6])
-            ws.append(["NAVFLU", "NAVIN FLUORINE INTERNATIONAL L", "INE048G01026", 22, 4543.51, 8425, -0.77, 99957.22, 185350, 85.4])
-            ws.append([None, None, None, None, None, None, None, 675657.22, 1109950, None])
-            wb.save(f)
-            p = parse_holdings(f)
-            self.assertEqual(p.header_row, 1)
-            self.assertEqual(p.column_map["isin"], "ISIN Code")
-            self.assertEqual(p.column_map["avg_price"], "Average Cost Price")
-            self.assertEqual(p.column_map["ltp"], "Current Market Price")
-            self.assertEqual(p.column_map["invested_value"], "Value At Cost")
-            self.assertEqual([h.isin for h in p.holdings], ["INE775A01035", "INE048G01026"])
-
-    def test_keyword_headers_and_exclusions(self):
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "h.csv"
-            f.write_text("Scrip Name,ISIN No.,Long Term Qty,Free Qty,Avg Buy Rate,Closing Rate\n"
-                         "ABC Ltd,INE000A01011,5,10,100,120\n", encoding="utf-8")
-            p = parse_holdings(f)
-            self.assertEqual(p.column_map["quantity"], "Free Qty")       # not 'Long Term Qty'
-            self.assertEqual(p.column_map["avg_price"], "Avg Buy Rate")
-            self.assertEqual(p.holdings[0].quantity, 10)
-
-    def test_unknown_layout(self):
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "h.csv"
-            f.write_text("foo,bar\n1,2\n", encoding="utf-8")
-            with self.assertRaises(PipelineError):
-                parse_holdings(f)
-
-    def test_multi_sheet_workbook(self):
-        """Broker export with Summary / Equity / Mutual Funds / Combined sheets: only Equity is read."""
-        hdr = ["Symbol", "ISIN", "Quantity Available", "Quantity Long Term", "Average Price", "Previous Closing Price"]
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "h.xlsx"
-            wb = openpyxl.Workbook()
-            s = wb.active
-            s.title = "Summary"
-            s.append(["Invested Value", 1000])
-            eq = wb.create_sheet("Equity")
-            eq.append(["Equity Holdings Statement as on 2026-10-07"])
-            eq.append(hdr)
-            eq.append(["ABC", "INE000A01011", 10, 5, 100, 120])
-            eq.append(["XYZ", "INE000A01029", 4, 0, 50, 40])
-            mf = wb.create_sheet("Mutual Funds")
-            mf.append(["Symbol", "ISIN", "Quantity Available", "Average Price"])
-            mf.append(["SOMEFUND", "INF000A01011", 12.5, 30])
-            cb = wb.create_sheet("Combined")
-            cb.append(hdr)
-            cb.append(["ABC", "INE000A01011", 10, 5, 100, 120])
-            cb.append(["SOMEFUND", "INF000A01011", 12.5, 0, 30, 31])
-            wb.save(f)
-            p = parse_holdings(f)
-            self.assertEqual(p.sheet, "Equity")
-            self.assertEqual([h.symbol for h in p.holdings], ["ABC", "XYZ"])
-            self.assertEqual(p.column_map["quantity"], "Quantity Available")
-            self.assertEqual(p.asof_in_file, "07/10/2026")
-            self.assertTrue(any("Mutual Funds" in n and n.startswith("WARN") for n in p.notes))
-            self.assertFalse(any("Combined" in n and n.startswith("WARN") for n in p.notes))
-
-    def test_multi_sheet_no_equity_table(self):
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "h.xlsx"
-            wb = openpyxl.Workbook()
-            wb.active.title = "Notes"
-            wb.active.append(["nothing here"])
-            wb.create_sheet("Combined").append(["Symbol", "Qty", "Avg Price"])
-            wb.save(f)
-            with self.assertRaises(PipelineError) as cm:
-                parse_holdings(f)
-            self.assertIn("Combined", str(cm.exception))
-
-    def test_asof_formats(self):
-        from crest.brokers import _normalize_asof
-        self.assertEqual(_normalize_asof("2026-10-07"), "07/10/2026")
-        self.assertEqual(_normalize_asof("7-10-2026"), "07/10/2026")
-        self.assertEqual(_normalize_asof("08/10/2026"), "08/10/2026")
+    def test_sample_converted(self):
+        h = read_template(HOLD)
+        self.assertEqual(len(h.holdings), 54)
+        self.assertEqual((h.client, h.asof), ("Sample Client", "08/10/2026"))
 
 
 class GeminiSingleRequest(unittest.TestCase):
@@ -396,7 +404,8 @@ class EndToEnd(unittest.TestCase):
     def test_status_and_checks(self):
         self.assertTrue(self.res.status.startswith("PASSED"), self.res.notes)
         st = {c.name: c.status for c in self.res.checks}
-        self.assertEqual(st["Invested value ties to broker file"], "PASS")
+        self.assertEqual(st["Every template holding is in the Portfolio or in Exceptions"], "PASS")
+        self.assertEqual(st["Excel invested + Exceptions = template holdings"], "PASS")
         self.assertEqual(st["% Allocation sums to 100%"], "PASS")
         self.assertEqual(st["ETF market cap shown as 'ETF' (not #N/A)"], "PASS")
         self.assertEqual(st["No leftover template placeholders"], "PASS")
@@ -427,7 +436,8 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(len(bse), 1)  # IndiGrid (BSE:540565) -> BOM: for Google Finance
         self.assertIn('SUBSTITUTE(C', bse[0])
         raw = wb["Raw_Holdings"]
-        self.assertEqual(raw["A1"].value, "Trading account: " + raw["A1"].value.split(": ", 1)[-1])
+        self.assertEqual((raw["B2"].value, raw["C2"].value), ("Client Name", "Sample Client"))
+        self.assertEqual(ws["F6"].value, "Universal Sheet CMP")
 
     def test_deck(self):
         prs = Presentation(next(self.out.glob("*_Review.pptx")))
@@ -482,17 +492,6 @@ class Narrative(unittest.TestCase):
             self.assertEqual(s4["Text 4"], "HBL Engineering - 9.16% weight · +127.08%")
 
 
-@needs_samples
-class BrokerLtp(unittest.TestCase):
-    def test_broker_ltp_weights(self):
-        with tempfile.TemporaryDirectory() as td:
-            res = run(**ARGS, runs_dir=td, price_source="broker_ltp", render_png=False)
-            ni = json.loads((res.run_dir / "outputs" / "narrative_input.json").read_text(encoding="utf-8"))
-            w = {h["symbol"]: h["weight_pct"] for h in ni["holdings"]}
-            self.assertAlmostEqual(w["HBLENGINE"], 8.88, places=2)
-            self.assertAlmostEqual(ni["portfolio"]["present_value"], 24574529.2, places=1)
-
-
 REAL_UNI = ROOT / "templates" / "universal-sheet.xlsx"
 
 
@@ -524,7 +523,7 @@ class RatingRulesTests(unittest.TestCase):
 
 @unittest.skipUnless(REAL_UNI.exists() and HAVE_SAMPLES, "real Universal Sheet / samples not present")
 class RealUniversalSheet(unittest.TestCase):
-    ARGS = dict(client="Sample Client", asof="08/10/2026", universal=REAL_UNI, holdings=HOLD, template=TPL)
+    ARGS = dict(universal=REAL_UNI, holdings=HOLD, template=TPL)
 
     def test_period_mismatch_stops(self):
         with tempfile.TemporaryDirectory() as td:

@@ -1,6 +1,6 @@
 # CREST Portfolio Review Generator
 
-Turns a client's broker holdings file into two deliverables:
+Turns a client's holdings, entered in the standard CREST holdings template, into two deliverables:
 
 * **`<Client> Portfolio.xlsx`**: holdings, values, P&L and weights. Every calculated cell is a formula, and Market Cap and
   CMP are Google Finance formulas.
@@ -19,8 +19,8 @@ only network call (see [Narrative](#narrative-slides)).
 pip install -r requirements.txt
 ```
 
-1. Put the client's broker file (.xlsx or .csv, exactly as downloaded) in **`input\`**.
-   The file name becomes the client name: `input\Sharma Family.xlsx` → client "Sharma Family".
+1. Copy the client's holdings into a copy of **`templates\Holdings_Template.xlsx`** (see
+   [Holdings template](#holdings-template)) and save it in **`input\`**.
 2. Run:
 
    ```powershell
@@ -41,12 +41,13 @@ Every file in `input\` is processed in one go, and the tool works the rest out:
 | Setting | Where it comes from |
 |---|---|
 | Period (e.g. Q2FY27) | the Universal Sheet's `Q Result Period` column |
-| As-on date | the holdings file's title ("as on dd/mm/yyyy"), else the file's saved date (flagged) |
+| Client name | cell C2 of the holdings template |
+| As-on date | cell C3 of the holdings template |
 | Universal Sheet | `templates\universal-sheet.xlsx` |
 | Deck template | `templates\Deck_-_template.pptx` |
 
-Optional overrides: `--client`, `--holdings`, `--period`, `--asof`, `--universal`, `--template`, `--narrative`,
-`--price-source broker_ltp`, `--broker`, `--output-dir`, `--runs-dir`, `--settings`, `--no-render`.
+Optional overrides: `--holdings` (one file), `--period`, `--universal`, `--template`, `--narrative`, `--output-dir`,
+`--runs-dir`, `--settings`, `--no-render`.
 
 ---
 
@@ -68,8 +69,8 @@ Client data and CREST research never go to GitHub; `.gitignore` excludes them. A
 | `templates/universal-sheet.xlsx` | The live Universal Sheet (all stocks, results, views); backups the tool makes before writing to it go to `templates/backups/` |
 | `.env` | narrative API key and models (copy `.env.example`) |
 | `templates/Deck_-_template.pptx` | The CREST deck template |
-| `input/*` | Client holdings files |
-| `samples/holdings.xlsx`, `samples/reference_portfolio.xlsx`, `samples/reference_deck_Q1FY27.pptx` | Reference files, only needed for the end-to-end tests |
+| `input/*` | Filled holdings templates (client data) |
+| `samples/holdings.xlsx`, `samples/reference_portfolio.xlsx`, `samples/reference_deck_Q1FY27.pptx` | Reference files, only needed for the end-to-end tests (the tests copy the broker sample into the holdings template) |
 
 `output/`, `runs/` and the generated test fixtures are also excluded.
 
@@ -80,7 +81,7 @@ Client data and CREST research never go to GitHub; `.gitignore` excludes them. A
 ```
 run.py                     entry point (python run.py)
 crest/                     the pipeline
-  brokers.py               reads any broker layout (header detection, duplicate merge)
+  holdings.py              reads and checks the holdings template (duplicate merge, exact-cell errors)
   universal.py             Universal Sheet loader and schema checks
   match.py                 holdings -> Universal rows (ISIN, symbol, alt symbols, exact name)
   excel_build.py           the Portfolio workbook
@@ -97,25 +98,25 @@ crest/                     the pipeline
   qa.py                    deck QA (placeholders, style, overflow, render)
   pipeline.py              runs the steps in order and archives each run
   report.py                writes report.md
-config/                    settings, broker column names, sector groups, sanity rules, rating rules
-templates/                 Universal_Sheet_template.xlsx (blank, in git); live sheet and deck template (private)
+config/                    settings, sector groups, sanity rules, rating rules
+templates/                 Holdings_Template.xlsx and Universal_Sheet_template.xlsx (blank, in git);
+                           live sheet and deck template (private)
 input/  output/  runs/     client files in, results out, full run archive
 tests/                     unit + end-to-end tests
-tools/                     developer helpers (test fixtures, comparison with reference files)
+tools/                     developer helpers (holdings template, test fixtures, comparison with reference files)
 ```
 
 ---
 
 ## How a run works
 
-1. **Read the holdings** (`crest/brokers.py`): finds the header row in any layout. It needs a quantity column, an
-   average/cost price column, and a symbol, ISIN or company-name column. Title, blank and total rows are skipped,
-   duplicate symbols are merged at a weighted average price, and zero-quantity rows are dropped.
+1. **Read the holdings template** (`crest/holdings.py`): client name, as-on date and one row per holding. Rows for
+   the same stock are merged at a weighted average price. Any problem stops the run and names the cell to fix.
 2. **Match** each holding to the Universal Sheet: by ISIN, then symbol, then Alt Symbols (BSE codes, former symbols),
    then exact company name. Anything else goes to Exceptions; the tool never guesses.
 3. **Tickers** are written as `NSE:SYMBOL` / `BSE:CODE`. `BOM:` is rewritten as `BSE:`, and a ticker with no exchange
    defaults to NSE and is flagged.
-4. **Build the Excel**: sheets `Portfolio`, `Raw_Holdings` (the upload, unchanged), `Holdings_Normalized`,
+4. **Build the Excel**: sheets `Portfolio`, `Raw_Holdings` (the template as uploaded, unchanged), `Holdings_Normalized`,
    `Universal_Snapshot` (this client's stocks only) and `Exceptions`. The Portfolio columns are:
 
    | Column | Content |
@@ -132,7 +133,7 @@ tools/                     developer helpers (test fixtures, comparison with ref
    check copy with the run's values in their place. That copy is scanned for `#N/A`, `#REF!`, `#DIV/0!` and other errors,
    and checked against an independent Python calculation.
 5. **Validation gate**:
-   * broker tie-out (within Σ qty × ₹0.005 for 2-dp rounding of average prices);
+   * every template holding is in the Portfolio table or in Exceptions, and the invested amounts add up;
    * unmatched symbols and missing prices (listed in Exceptions);
    * % Allocation = 100%;
    * sector sanity and missing sectors;
@@ -151,8 +152,7 @@ tools/                     developer helpers (test fixtures, comparison with ref
    Earlier runs move to `_history/`. Results are copied to `output\<client>\<period>\`; a file there that is open in
    Excel / PowerPoint is not replaced - the new version is saved beside it as `<name> (new).<ext>`.
 
-**Pricing**: `price_source` in `config/settings.json` (or `--price-source`) is `universal_cmp` (default, the
-Universal Sheet CMP) or `broker_ltp`. One run never mixes the two.
+**Pricing**: every price is the Universal Sheet CMP. The holdings template has no price column.
 
 ---
 
@@ -164,7 +164,7 @@ Blank layout with a column guide: `templates/Universal_Sheet_template.xlsx` (Leg
 |---|---|---|
 | Name, Ticker, Sector, Market Cap (Cr), CMP, Views | required columns | blank cells allowed (flagged) |
 | Result Line (or `Q1 Result Summary` / `Result Summary`), Rating, Sentiment, Management Commentary | required columns | quarterly fields for the results tables |
-| Symbol, Alt Symbols, ISIN | optional | used for matching broker files |
+| Symbol, Alt Symbols, ISIN | optional | used for matching holdings |
 | Q Result Period | optional | e.g. `Q2 FY27`; sets the run period, and a mismatch stops the run |
 | Short Name, Deck Group, Exchange, Instrument Type | optional | display name, group override, ETF flag (`Sector = ETF` also works) |
 | Rating Source, Rating Reason | written by the tool | added when the narrative API fills a blank Rating / Sentiment (source, period and a change code); leave blank for ratings you type |
@@ -208,28 +208,29 @@ next model in the list; if all fail, the list is tried once more after 30 second
 and deck are still built (narrative slides pending) and the next run asks again. Set `narrative_provider` and
 `rating_provider` to `"manual"` / `"rules"` in `config/settings.json` to never call the API.
 
-## Broker layouts
+## Holdings template
 
-Most exports work with no setup. If a file is not recognised, the error shows the first rows it saw. Add its column
-names to `config/brokers/generic_equity_holdings.json`:
+`templates\Holdings_Template.xlsx` is the only holdings format the tool reads (re-create it with
+`python tools/build_holdings_template.py`). Its second sheet, "How to fill", explains it for staff.
 
-| Key | Meaning |
+| Cell / row | Content |
 |---|---|
-| `columns` | exact header names per field |
-| `keywords` | whole words looked for inside a header |
-| `exclude` | words that rule a header out (e.g. `Long Term Qty` is not the quantity) |
-| `asof_regex` | reads the as-on date from title rows (`dd/mm/yyyy`, `dd-mm-yyyy` or `yyyy-mm-dd`) |
+| `B2` / `C2` | "Client Name" / the client's name, as it should appear on the deck |
+| `B3` / `C3` | "As On Date" / the statement date, `dd/mm/yyyy` or a real Excel date |
+| Row 5 | Headers: `ISIN`, `Symbol`, `Company Name`, `Quantity`, `Average Price` (found by name, any order) |
+| Row 6 onwards | One holding per row, ending at the first blank row |
 
-**Workbooks with several sheets** (e.g. `Equity`, `Mutual Funds`, `Combined`): the first sheet with a holdings
-table is used, skipping sheets whose name contains fund / MF / combined / consolidated / summary / bond / debt / ETF.
-The sheet used is shown in `report.md`. If a skipped funds sheet has holdings, the run warns that they are not in the review.
+Every row needs Quantity above 0, Average Price above 0, and an ISIN or a Symbol (NSE symbol or BSE code). Company
+Name is optional and is only used for matching when neither ISIN nor Symbol is found. Rows for the same stock (same
+ISIN or symbol) are merged at a weighted average price. A missing column, text where a number should be, a malformed
+ISIN, or a blank client name or date stops the run and lists every cell to fix. Rows below the first blank row are
+not read, and the run warns about them.
 
 ## Configuration
 
 | File | Purpose |
 |---|---|
-| `config/settings.json` | price source, narrative checks, tolerances, table split sizes |
-| `config/brokers/*.json` | broker column names |
+| `config/settings.json` | narrative checks, tolerances, table split sizes |
 | `config/sector_groups.json` | sector (Screener industry) → deck group, group order, per-stock overrides |
 | `config/sector_rules.json` | name keywords → plausible sectors (sanity check) |
 | `config/rating_rules.json` | draft rating rules (inactive until approved) |

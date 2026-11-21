@@ -76,7 +76,6 @@ def main():
     run = Path(a.run_dir)
     out = run / "outputs"
     ni = json.loads((out / "narrative_input.json").read_text(encoding="utf-8"))
-    ps = ni["run"]["price_source"]
     ours = {h["symbol"]: h for h in ni["holdings"]}
     xl = next(out.glob("* Portfolio.xlsx"))
     wb = openpyxl.load_workbook(xl)
@@ -88,7 +87,7 @@ def main():
     by_code = {code_of[s]: h for s, h in ours.items()}
 
     L = ["# Comparison with the reference files", "",
-         f"Run: `{run}`  ", f"Price source in this run: **{ps}**", ""]
+         f"Run: `{run}`  ", "Price source in this run: **Universal Sheet CMP**", ""]
 
     # ---------------- Excel
     L += ["## Excel vs reference_portfolio.xlsx", "", "### Structure", "",
@@ -127,7 +126,7 @@ def main():
         "Ticker": "BOM: prefix rewritten as BSE: (rule 3)",
         "Market Cap (Cr)": "ETF market cap shown as 'ETF' instead of #N/A",
         "Invested Value": "Reference rounds Qty x Avg Price to whole rupees on some rows; this run keeps the exact product",
-        "CMP": f"price_source = {ps}" + (" (broker LTP), reference used a different price set" if ps == "broker_ltp" else ""),
+        "CMP": "Universal Sheet CMP",
         "Current Value": "follows CMP", "Unrealized P&L": "follows CMP / invested rounding",
         "Unrealized P&L (%)": "follows CMP", "% Allocation": "follows CMP (and the reference rounds to 4 dp)",
     }
@@ -183,7 +182,7 @@ def main():
         if (r["slide"], r["pos"]) != (o["slide"], o["pos"]):
             pos.append((code, f"slide {r['slide']} row {r['pos']}", f"slide {o['slide']} row {o['pos']}"))
     extra = [c for c in our_st if c not in ref_st]
-    wwhy = {"weight": f"Weights come from the Excel % Allocation at price_source={ps}. The reference deck used a third price "
+    wwhy = {"weight": "Weights come from the Excel % Allocation at Universal Sheet CMP. The reference deck used a third price "
                       "set that matches neither the sample Excel CMPs nor the broker LTPs (e.g. HBL 8.78% vs 9.16% vs 8.88%).",
             "view": "Universal Sheet 'Views' is authoritative (your decision). The reference deck's views differ from the sample Excel views.",
             "result": "Copied from the deck into the test fixture, so differences are whitespace only, if any.",

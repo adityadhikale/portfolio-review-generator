@@ -17,28 +17,11 @@ class Check:
     items: list = field(default_factory=list)
 
 
-def tieout(all_holdings, tol_extra: float) -> Check:
-    """Broker's own invested total vs Σ qty × avg price. Broker avg prices are rounded to 2 dp, so the
-    allowed gap is Σ(qty × ₹0.005) + a small fixed amount."""
-    have = [h for h in all_holdings if h.invested_value_broker is not None]
-    calc = sum(h.quantity * h.avg_price for h in all_holdings)
-    if not have:
-        return Check("Invested value ties to broker file", "WARN",
-                     f"Broker file has no invested-value column; Σ Qty × Avg Price = ₹{calc:,.2f} (not tied out)")
-    broker = sum(h.invested_value_broker for h in have)
-    tol = sum(abs(h.quantity) * 0.005 for h in all_holdings) + tol_extra
-    diff = calc - broker
-    status = "PASS" if abs(diff) <= tol and len(have) == len(all_holdings) else "FAIL"
-    return Check("Invested value ties to broker file", status,
-                 f"Broker INVESTMENT VALUE total ₹{broker:,.2f} vs Σ Qty × Avg Price ₹{calc:,.2f}; difference "
-                 f"₹{diff:,.2f} (allowed ±₹{tol:,.2f} for 2-dp rounding of average price)")
-
-
 def excel_ties(excel_invested: float, exceptions_invested: float, all_holdings) -> Check:
     calc = sum(h.quantity * h.avg_price for h in all_holdings)
     gap = excel_invested + exceptions_invested - calc
     st = "PASS" if abs(gap) < 0.05 else "FAIL"
-    return Check("Excel invested + Exceptions = broker holdings", st,
+    return Check("Excel invested + Exceptions = template holdings", st,
                  f"Excel Portfolio invested ₹{excel_invested:,.2f} + Exceptions ₹{exceptions_invested:,.2f} "
                  f"vs Σ Qty × Avg ₹{calc:,.2f} (gap ₹{gap:,.2f})")
 

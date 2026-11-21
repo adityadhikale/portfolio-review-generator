@@ -2,8 +2,8 @@
 
 Sheets
   Portfolio            summary block (B2:C6) + holdings table (header row 8, data from row 9), as in reference_portfolio.xlsx
-  Raw_Holdings         the broker upload, cell-for-cell
-  Holdings_Normalized  the broker rows the pipeline used (duplicates merged, footers dropped)
+  Raw_Holdings         the holdings template as uploaded, cell-for-cell
+  Holdings_Normalized  the holdings the pipeline used (duplicate rows merged)
   Universal_Snapshot   the Universal Sheet rows matched to this client (no other stocks)
   Exceptions           everything that needs a human look
 """
@@ -39,7 +39,7 @@ PORTFOLIO_COLS = ["Key", "Name", "Ticker", "Sector", "Market Cap (Cr)", "Quantit
 SNAP_COLS = ["Key", "Name", "Ticker (CREST)", "Sector", "Market Cap (Cr)", "CMP", "Views", "Short Name",
              "Deck Group", "Result Line", "Rating", "Sentiment", "Management Commentary", "Is ETF",
              "Universal Row", "Ticker (as in Universal)", "Rating Source"]
-NORM_COLS = ["Key", "Broker Symbol", "Quantity", "Average Price", "Broker LTP", "Broker Invested Value",
+NORM_COLS = ["Key", "Symbol / ISIN (as typed)", "ISIN", "Company Name", "Quantity", "Average Price",
              "Source Rows (Raw_Holdings)"]
 
 
@@ -80,8 +80,7 @@ def _font_all(ws, size=10):
             c.font = cache[key]
 
 
-def build_workbook(path: Path, *, client: str, asof: str, period_label: str, price_source: str,
-                   parse, priced: list, snapshot_rows: list, exception_rows: list, deck_group_of,
+def build_workbook(path: Path, *, client: str, asof: str, period_label: str, parse, priced: list, snapshot_rows: list, exception_rows: list, deck_group_of,
                    google_finance: bool = True) -> ExcelLayout:
     """priced: list of Matched sorted by current value desc (only rows with a price).
     snapshot_rows: list of Matched (all matched, incl. those without a price)."""
@@ -113,24 +112,18 @@ def build_workbook(path: Path, *, client: str, asof: str, period_label: str, pri
         if h.symbol in seen:
             continue
         seen.add(h.symbol)
-        norm.append([h.symbol, h.raw_symbol, h.quantity, h.avg_price, h.ltp, h.invested_value_broker,
+        norm.append([h.symbol, h.raw_symbol, h.isin, h.name, h.quantity, h.avg_price,
                      ", ".join(str(x) for x in h.source_rows)])
         nrow += 1
     n_last = nrow - 1
     for r in range(2, n_last + 1):
-        norm.cell(r, 3).number_format = QTY
-        for c in (4, 5, 6):
-            norm.cell(r, c).number_format = INR
+        norm.cell(r, 5).number_format = QTY
+        norm.cell(r, 6).number_format = INR
     chk = n_last + 2
-    norm.cell(chk, 2, "Broker invested total").font = Font(name=FONT, bold=True)
-    norm.cell(chk, 6, f"=SUM(F2:F{n_last})").number_format = INR
-    norm.cell(chk + 1, 2, "Qty x Avg Price total").font = Font(name=FONT, bold=True)
-    norm.cell(chk + 1, 6, f"=SUMPRODUCT(C2:C{n_last},D2:D{n_last})").number_format = INR
-    norm.cell(chk + 2, 2, "Difference (avg-price rounding)").font = Font(name=FONT, bold=True)
-    norm.cell(chk + 2, 6, f"=F{chk + 1}-F{chk}").number_format = INR
-    norm.cell(1, 9, "Values are the broker file's own numbers after merging duplicate symbols "
-                    "(weighted average price) and dropping footer / zero-quantity rows.")
-    for j, w in enumerate([14, 16, 12, 14, 14, 18, 22], start=1):
+    norm.cell(chk, 4, "Qty x Avg Price total").font = Font(name=FONT, bold=True)
+    norm.cell(chk, 6, f"=SUMPRODUCT(E2:E{n_last},F2:F{n_last})").number_format = INR
+    norm.cell(1, 9, "The holdings template's rows after merging rows for the same stock (weighted average price).")
+    for j, w in enumerate([14, 18, 16, 34, 12, 14, 22], start=1):
         norm.column_dimensions[get_column_letter(j)].width = w
     norm.freeze_panes = "A2"
     _font_all(norm)
@@ -174,7 +167,7 @@ def build_workbook(path: Path, *, client: str, asof: str, period_label: str, pri
         b.number_format = fmt
         a.border = b.border = BOX
     info = [("Client", client), ("Data as of", asof), ("Period", period_label),
-            ("Price source", "Universal Sheet CMP" if price_source == "universal_cmp" else "Broker LTP (holdings file)")]
+            ("Price source", "Universal Sheet CMP")]
     for i, (lab, val) in enumerate(info, start=3):
         ws.cell(i, 5, lab).font = Font(name=FONT, bold=True, color="595959")
         ws.cell(i, 6, val).font = Font(name=FONT, color="595959")
@@ -194,7 +187,7 @@ def build_workbook(path: Path, *, client: str, asof: str, period_label: str, pri
         gref = f"C{r}" if u.ticker_exchange == "NSE" else f'SUBSTITUTE(C{r},""BSE:"",""BOM:"")'  # Google uses BOM: for BSE
         mcap = value_number(u, "mcap")
         mcap_fb = '"ETF"' if u.is_etf else (repr(round(mcap, 2)) if mcap is not None else '""')
-        price = h.ltp if price_source == "broker_ltp" else value_number(u, "cmp")
+        price = value_number(u, "cmp")
         row = [h.symbol,
                u.values["name"],
                f'=IFERROR({look("C", r)}&"","")',
@@ -238,7 +231,7 @@ def build_workbook(path: Path, *, client: str, asof: str, period_label: str, pri
     ws.row_dimensions[HEADER_ROW].height = 30
     ws.freeze_panes = f"C{first}"
     ws.auto_filter.ref = f"B{HEADER_ROW}:N{last}"
-    ws[f"A{HEADER_ROW}"].comment = Comment("Hidden key column: normalised broker symbol used by every INDEX/MATCH lookup.", "CREST")
+    ws[f"A{HEADER_ROW}"].comment = Comment("Hidden key column: normalised symbol (or ISIN) used by every INDEX/MATCH lookup.", "CREST")
 
     # ---------------- Exceptions
     _hdr(exc, 1, ["Severity", "Type", "Symbol", "Detail", "Quantity", "Average Price", "Invested (Qty x Avg)"])

@@ -67,7 +67,6 @@ def _client_safe(ni: dict) -> dict:
     safe = {k: v for k, v in json.loads(json.dumps(ni)).items() if k not in ("narrative_schema", "rules")}
     if isinstance(safe.get("run"), dict):
         safe["run"].pop("client", None)
-        safe["run"].pop("price_source", None)
     if isinstance(safe.get("portfolio"), dict):
         safe["portfolio"] = {k: safe["portfolio"][k] for k in _PORTFOLIO_FIELDS if k in safe["portfolio"]}
     safe["holdings"] = [{k: h.get(k) for k in _HOLDING_FIELDS if h.get(k) not in (None, "")}

@@ -29,6 +29,7 @@ tests/fixtures/narrative_maneesh.json
 *.pptx
 *.pdf
 !templates/Universal_Sheet_template.xlsx
+!templates/Holdings_Template.xlsx
 
 # ---------------------------------------------------------------------------
 # Python / tooling

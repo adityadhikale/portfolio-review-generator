@@ -1,10 +1,10 @@
-"""Match broker holdings to Universal Sheet rows. Never guesses: ISIN (when the broker file has one), then exact
+"""Match template holdings to Universal Sheet rows. Never guesses: ISIN (when the template has one), then exact
 symbol, then ticker code / Alt Symbols, then exact normalised name (only if unique). Anything else goes to Exceptions."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .brokers import Holding
+from .holdings import Holding
 from .universal import UniRow, Universe
 from .util import normalize_name
 
@@ -52,7 +52,7 @@ def match_holdings(holdings: list[Holding], uni: Universe):
                 continue
         if u is None:
             exceptions.append(MatchException("Unmatched", h.raw_symbol,
-                                             f"Not found in Universal Sheet by ISIN ({h.isin or 'none in file'}), symbol, ticker code or exact name"
+                                             f"Not found in Universal Sheet by ISIN ({h.isin or 'none in template'}), symbol, ticker code or exact name"
                                              f"{' (' + h.name + ')' if h.name else ''}. "
                                              "Add it to the Universal Sheet (or its 'Symbol' column).", h))
             continue

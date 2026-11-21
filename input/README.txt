@@ -1,4 +1,4 @@
-1. Put each client's broker file here (.xlsx or .csv), as downloaded.
-   The file name is used as the client name:  Sharma Family.xlsx  ->  client "Sharma Family"
-2. Run:   python run.py
-3. Results appear in  output\<client>\<period>\
+1. Copy the client's holdings into a copy of templates\Holdings_Template.xlsx:
+   client name in C2, as-on date in C3 (dd/mm/yyyy), holdings from row 6.
+2. Save the filled template here (.xlsx) and run:   python run.py
+3. Results appear in  output\<client>\<period>\r

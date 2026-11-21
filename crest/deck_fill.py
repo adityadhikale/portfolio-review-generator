@@ -240,7 +240,7 @@ def fill_table_slide(slide, title: str, rows: list, dcfg: dict):
 
 # --------------------------------------------------------------------------- main fill
 def fill_deck(template, out_path, *, data: dict, narrative: dict | None, period, client: str, asof: str,
-              dcfg: dict, ratings_by_ai: bool = False, price_source: str = "universal_cmp") -> dict:
+              dcfg: dict, ratings_by_ai: bool = False) -> dict:
     prs = Presentation(template)
     pend = dcfg["pending_marker"]
     pending, problems = [], []
@@ -378,8 +378,7 @@ def fill_deck(template, out_path, *, data: dict, narrative: dict | None, period,
     set_text(shape(s15, "Text 17"),
              f"Company results (revenue, PAT) and management commentary from the CREST Universal Sheet for "
              f"{period.label}. {rating_src}. Current View is CREST's own. Holdings and weights from {client}'s "
-             f"holdings statement as on {asof}; prices from "
-             f"{'the broker statement' if price_source == 'broker_ltp' else 'the CREST Universal Sheet'}.")
+             f"holdings statement as on {asof}; prices from the CREST Universal Sheet.")
 
     # ---- results tables: clone the prototype per group / chunk, then drop the template table slides
     proto = prs.slides[TABLE_PROTOTYPE - 1]

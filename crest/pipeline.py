@@ -13,9 +13,9 @@ from . import deck_data as dd
 from . import validate as V
 from .ai_ratings import RatingCache, rating_basis
 from .ai_review import request_review
-from .brokers import parse_holdings
 from .deck_fill import fill_deck
 from .excel_build import build_workbook
+from .holdings import read_template
 from .narrative_api import GeminiClient, resolve_ai
 from .match import match_holdings
 from .narrative import SCHEMA, ManualProvider, blank_template, check_numbers, resolve_provider_name, style_issues
@@ -24,7 +24,7 @@ from .qa import render, run_qa
 from .ratings import RatingRules
 from .sheet_writeback import ai_tag, tag_basis, write_cells
 from .universal import load_universe, value_number
-from .util import CONFIG_DIR, ROOT, PipelineError, load_env, load_json, parse_asof, parse_period, safe_filename
+from .util import CONFIG_DIR, ROOT, PipelineError, load_env, load_json, parse_period, safe_filename
 
 
 @dataclass
@@ -63,41 +63,30 @@ def _archive_dir(base: Path, period: str, client: str) -> Path:
     return root
 
 
-def run(*, client, period, asof, universal, holdings, template, narrative=None, broker=None,
-        price_source=None, runs_dir=None, settings_path=None, render_png=True, publish_dir=None) -> RunResult:
+def run(*, period, universal, holdings, template, narrative=None, runs_dir=None, settings_path=None,
+        render_png=True, publish_dir=None) -> RunResult:
+    """holdings: a filled CREST holdings template (templates/Holdings_Template.xlsx). The client name and the
+    as-on date are read from it; prices always come from the Universal Sheet."""
     settings = load_json(Path(settings_path) if settings_path else CONFIG_DIR / "settings.json")
-    if price_source:
-        settings["price_source"] = price_source
-    ps = settings["price_source"]
-    if ps not in ("universal_cmp", "broker_ltp"):
-        raise PipelineError(f"price_source must be universal_cmp or broker_ltp, got '{ps}'")
     per = parse_period(period)
     universal, holdings, template = Path(universal), Path(holdings), Path(template)
     for p in (universal, holdings, template):
         if not p.exists():
             raise PipelineError(f"Input file not found: {p}")
-    asof_note = None
-    if not asof:  # take the as-on date from the holdings file's title rows, else the file's saved date
-        asof = parse_holdings(holdings, broker).asof_in_file
-        if not asof:
-            asof = datetime.fromtimestamp(holdings.stat().st_mtime).strftime("%d/%m/%Y")
-            asof_note = (f"WARN: the holdings file has no 'as on' date in its title; used the file's saved date "
-                         f"{asof}. Pass --asof dd/mm/yyyy if that is wrong.")
-    parse_asof(asof)
+    hf = read_template(holdings)
+    client, asof = hf.client, hf.asof
     res = RunResult()
-    if asof_note:
-        res.notes.append(asof_note)
     run_dir = _archive_dir(Path(runs_dir) if runs_dir else ROOT / "runs", per.compact, client)
     res.run_dir = run_dir
     out = run_dir / "outputs"
     for p in (universal, holdings, template):
         shutil.copy2(p, run_dir / "inputs" / p.name)
     narrative_path = Path(narrative) if narrative else run_dir / "narrative.json"
-    res.info.update(client=client, period=per.label, asof=asof, price_source=ps, universal=universal.name,
+    res.info.update(client=client, period=per.label, asof=asof, universal=universal.name,
                     holdings=holdings.name, template=template.name, narrative_path=str(narrative_path),
                     started=datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
     try:
-        _run_inner(res, settings, per, client, asof, universal, holdings, template, narrative_path, broker, out,
+        _run_inner(res, settings, per, client, asof, universal, holdings, template, narrative_path, hf, out,
                    render_png)
     except PipelineError as e:
         res.status = "FAILED"
@@ -146,22 +135,14 @@ def _publish(res, dest: Path) -> bool:
     return bool(locked)
 
 
-def _run_inner(res, settings, per, client, asof, universal, holdings, template, narrative_path, broker, out, render_png):
-    ps = settings["price_source"]
+def _run_inner(res, settings, per, client, asof, universal, holdings, template, narrative_path, bp, out, render_png):
     groups_cfg = load_json(CONFIG_DIR / "sector_groups.json")
     overrides = load_json(CONFIG_DIR / "name_overrides.json").get("overrides", {})
 
-    # 1. broker adapter
-    bp = parse_holdings(holdings, broker)
-    res.info.update(broker=bp.broker, holdings_sheet=bp.sheet or "n/a (CSV)", header_row=bp.header_row, column_map=bp.column_map,
-                    holdings_parsed=len(bp.holdings), asof_in_file=bp.asof_in_file)
+    # 1. holdings template (already read and checked by run())
+    res.info.update(holdings_sheet=bp.sheet, holdings_parsed=len(bp.holdings))
     if Path(narrative_path).exists():
         shutil.copy2(narrative_path, res.run_dir / "inputs" / "narrative.json")
-    if bp.asof_in_file and bp.asof_in_file != asof:
-        res.notes.append(f"WARN: holdings file says 'as on {bp.asof_in_file}' but --asof is {asof}")
-    for d in bp.dropped:
-        res.exceptions.append(Exc("INFO", "Dropped row", str(d["values"][0] if d["values"] else ""),
-                                  f"Holdings row {d['row']}: {d['reason']}"))
     res.notes += bp.notes
 
     # 2. universal + match
@@ -270,11 +251,10 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
                 res.exceptions.append(Exc("WARN", "Unmapped deck group", h.raw_symbol,
                                           f"Sector '{u.values.get('sector')}' / Deck Group '{u.values.get('deck_group') or ''}' "
                                           "not in config/sector_groups.json - shown under 'Other Holdings'"))
-        price = h.ltp if ps == "broker_ltp" else value_number(u, "cmp")
+        price = value_number(u, "cmp")
         if price is None or price <= 0:
             res.exceptions.append(Exc("WARN", "Missing price", h.raw_symbol,
-                                      f"No {'broker LTP' if ps == 'broker_ltp' else 'Universal CMP'} "
-                                      f"(cell value: {h.ltp if ps == 'broker_ltp' else u.values.get('cmp')!r}); "
+                                      f"No Universal CMP (cell value: {u.values.get('cmp')!r}); "
                                       "excluded from Portfolio table and deck - fix the price and re-run", h))
             continue
         priced.append((h.quantity * price, m))
@@ -290,20 +270,20 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
     xlsx = out / f"{client} Portfolio.xlsx"
     sev_order = {"FAIL": 0, "WARN": 1, "INFO": 2}
     exc_rows = sorted(res.exceptions, key=lambda e: sev_order.get(e.severity, 3))
-    layout = build_workbook(xlsx, client=client, asof=asof, period_label=per.label, price_source=ps, parse=bp,
+    layout = build_workbook(xlsx, client=client, asof=asof, period_label=per.label, parse=bp,
                             priced=priced, snapshot_rows=matched, exception_rows=exc_rows, deck_group_of=deck_group_of)
     res.outputs["excel"] = xlsx
 
     soffice = find_soffice(settings.get("libreoffice_path", ""))
     res.info["libreoffice"] = soffice or "not found"
-    py = dd.python_values(priced, ps)
+    py = dd.python_values(priced)
     if soffice:
         # The delivered workbook carries Google-Sheets GOOGLEFINANCE formulas (Market Cap, CMP) that LibreOffice
         # cannot evaluate (and would rewrite). So a check copy with this run's values in those two columns is
         # recalculated instead; every other formula is identical. The delivered file is left untouched.
         check = out / "_recalc" / f"check_{xlsx.name}"
         check.parent.mkdir(parents=True, exist_ok=True)
-        build_workbook(check, client=client, asof=asof, period_label=per.label, price_source=ps, parse=bp,
+        build_workbook(check, client=client, asof=asof, period_label=per.label, parse=bp,
                        priced=priced, snapshot_rows=matched, exception_rows=exc_rows, deck_group_of=deck_group_of,
                        google_finance=False)
         rc = recalculate_copy(check, check, soffice)
@@ -320,10 +300,16 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
         excel_vals = _py_as_excel(py, matched, priced, deck_group_of)
 
     # 5. validation gate
-    # every broker holding exactly once (a matched stock with no price is also in Exceptions)
-    all_h = list({h.symbol: h for h in [m.holding for m in matched] +
-                  [e.holding for e in res.exceptions if e.holding is not None]}.values())
-    res.checks.insert(0, V.tieout(all_h, settings["tieout_extra_tolerance_inr"]))
+    # every template holding exactly once: in the Portfolio table or in Exceptions (a matched stock with no price
+    # is also in Exceptions)
+    all_h = bp.holdings
+    accounted = {id(m.holding) for m in matched} | {id(e.holding) for e in res.exceptions if e.holding is not None}
+    lost = [h.raw_symbol for h in all_h if id(h) not in accounted]
+    res.checks.insert(0, V.Check("Every template holding is in the Portfolio or in Exceptions",
+                                 "FAIL" if lost else "PASS",
+                                 f"Not accounted for: {', '.join(lost)}" if lost else
+                                 f"All {len(all_h)} holding(s) from {sum(len(h.source_rows) for h in all_h)} "
+                                 "template row(s) accounted for"))
     in_table = {m.holding.symbol for m in priced}
     exc_inv = sum(h.quantity * h.avg_price for h in all_h if h.symbol not in in_table)
     res.checks.append(V.excel_ties(excel_vals["summary"]["invested"] or 0, exc_inv, all_h))
@@ -347,7 +333,7 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
 
     # 6. deck data + narrative_input.json
     def deck_data_and_input():
-        d = dd.build_deck_data(excel_vals, client=client, period=per, asof=asof, price_source=ps,
+        d = dd.build_deck_data(excel_vals, client=client, period=per, asof=asof,
                                group_order=groups_cfg["group_order"], unmapped_group=groups_cfg["unmapped_group"],
                                tail_pct=settings["deck"]["tail_weight_threshold_pct"], top_n=settings["deck"]["top_n"])
         n = {k: v for k, v in d.items() if not k.startswith("_")}
@@ -399,7 +385,7 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
                     if snap is not None:
                         snap["rating"], snap["sentiment"] = m.uni.rating, m.uni.sentiment
             # ratings appear in the workbook (Universal_Snapshot) and in the deck data: rebuild both
-            build_workbook(xlsx, client=client, asof=asof, period_label=per.label, price_source=ps, parse=bp,
+            build_workbook(xlsx, client=client, asof=asof, period_label=per.label, parse=bp,
                            priced=priced, snapshot_rows=matched, exception_rows=exc_rows, deck_group_of=deck_group_of)
             data, ni = deck_data_and_input()
             res.notes.append(f"WARN: Rating/Sentiment for {len(stored)} stock(s) written by Gemini ({gc.model}) and "
@@ -441,7 +427,7 @@ def _run_inner(res, settings, per, client, asof, universal, holdings, template, 
     # 8. deck
     deck = out / f"{safe_filename(client).replace(' ', '_')}_CREST_Portfolio_{per.compact}_Review.pptx"
     fill = fill_deck(template, deck, data=data, narrative=nar, period=per, client=client, asof=asof,
-                     dcfg=settings["deck"], ratings_by_ai=ai_on, price_source=ps)
+                     dcfg=settings["deck"], ratings_by_ai=ai_on)
     res.outputs["deck"] = deck
     res.narrative["pending_fields"] = fill["pending"]
     res.narrative["problems"] = fill["problems"]
