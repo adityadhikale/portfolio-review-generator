@@ -513,6 +513,199 @@ class GoogleSheetSource(unittest.TestCase):
         self.assertNotIn("Universal Sheet read live from Google", {c.name for c in res2.checks})
 
 
+class AIResearch(unittest.TestCase):
+    """Phase 4: AI fills Sector / Result Line / Commentary. Gemini and Tavily are replaced: no network."""
+    HDR = ["Name", "Ticker", "Sector", "Market Cap (Cr)", "CMP", "Views", "Result Line", "Rating", "Sentiment",
+           "Management Commentary", "Q Result Period"]
+    ROWS = [HDR,
+            ["Aaa Ltd", "NSE:AAA", "", 900, 100, "Hold", "", "", "", "", ""],                     # needs all three
+            ["Bbb Ltd", "NSE:BBB", "Private Sector Bank", 900, 100, "Buy", "Rev +10% YoY; PAT +5% YoY", "Good",
+             "Bullish", "Typed by CREST", "Q1 FY27"],                                             # typed, old quarter
+            ["Nifty Bees ETF", "NSE:NIFTYBEES", "ETF", "", 250, "", "", "", "", "", ""]]          # ETF: nothing
+    ENV = {"NARRATIVE_PROVIDER": "gemini", "NARRATIVE_API_KEY": "k", "NARRATIVE_MODEL": "m1",
+           "TAVILY_API_KEY": "tvly-x"}
+    EXTRACT = {"title": "Aaa Ltd Q2 FY27 results", "url": "https://example.com/aaa-q2",
+               "content": "Aaa Ltd Q2 FY27: revenue from operations Rs 610.4 crore, up 45.9% YoY; net profit Rs 71 "
+                          "crore, up 153.6%. Order book at Rs 2,100 crore."}
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.td, True)
+        self.per = parse_period("Q2FY27")
+
+    def _universe(self, rows=None, fake=None):
+        from crest.holdings import Holding
+        from crest.match import match_holdings
+        from crest.sheet_source import GoogleSheet, UniversalSheet
+        from crest.universal import load_universe
+        self.fake = fake or FakeGoogle([rows or self.ROWS], cells={"A2": "Aaa Ltd", "A3": "Bbb Ltd"})
+        uni = load_universe(UniversalSheet(GoogleSheet("sheet-id-123456", session=self.fake, sleep=lambda s: None), self.td))
+        hs = [Holding(r.key, r.key, 10, 50) for r in uni.rows]
+        return uni, match_holdings(hs, uni)[0]
+
+    def _gemini(self, answer):
+        """A Gemini stand-in: answer(stock item) -> reply dict for that stock."""
+        self.sent = []
+
+        def post(url, body):
+            self.sent.append(body)
+            items = json.loads(body["contents"][0]["parts"][0]["text"])["stocks"]
+            reply = {"stocks": [dict(answer(it), symbol=it["symbol"]) for it in items]}
+            return {"candidates": [{"content": {"parts": [{"text": json.dumps(reply)}]}}]}
+        return post
+
+    def _tavily(self, results=None):
+        self.queries = []
+
+        def post(url, body):
+            self.queries.append(body["query"])
+            return {"results": [self.EXTRACT] if results is None else results}
+        return post
+
+    GOOD = {"status": "found", "quarter": "Q2 FY27", "sector": "pharmaceuticals", "revenue_cr": 610.4,
+            "revenue_yoy_pct": 45.9, "pat_cr": 71, "pat_yoy_pct": 153.6,
+            "commentary": "Order book stood at Rs 2,100 cr at the end of Q2 FY27.", "sources": [1]}
+
+    def _run(self, matched, answer=None, env=None, settings=None, budget=2, tavily=None):
+        from crest.ai_research import research
+        return research(matched=matched, per=self.per, settings=settings or {}, env=self.ENV if env is None else env,
+                        cache_path=self.td / "ai_research.json", budget=budget,
+                        post=self._gemini(answer or (lambda it: self.GOOD)), tavily_post=tavily or self._tavily(),
+                        say=lambda t: None)
+
+    def test_needs(self):
+        from crest.ai_research import needs, research_tag
+        uni, matched = self._universe()
+        u = {m.uni.key: m.uni for m in matched}
+        self.assertEqual(needs(u["AAA"], self.per), {"sector", "result", "commentary"})
+        self.assertEqual(needs(u["BBB"], self.per), set())          # typed result for Q1: never touched
+        self.assertEqual(needs(u["NIFTYBEES"], self.per), set())
+        u["BBB"].values.update(data_source=research_tag("m", "Q1FY27", {"result", "commentary"}, ["https://x"]))
+        self.assertEqual(needs(u["BBB"], self.per), {"result", "commentary"})   # AI's own old quarter: refreshed
+
+    def test_tavily_fill_and_write_back(self):
+        from crest.ai_research import ai_sourced, tagged_fields, write_back
+        uni, matched = self._universe()
+        out = self._run(matched)
+        a = next(m.uni for m in matched if m.uni.key == "AAA")
+        self.assertEqual((out.requests, out.searches), (1, 1))
+        self.assertEqual(a.values["sector"], "Pharmaceuticals")
+        self.assertEqual(a.values["result"], "Rev +45.9% YoY (Rs 610cr); PAT +153.6% YoY (Rs 71cr)")
+        self.assertEqual(a.values["commentary"], self.GOOD["commentary"])
+        self.assertEqual(a.values["result_period"], "Q2 FY27")
+        self.assertEqual(tagged_fields(a.values["data_source"]), {"sector", "result", "commentary"})
+        self.assertIn("https://example.com/aaa-q2", a.values["data_source"])
+        self.assertIn("Aaa Ltd (NSE: AAA) Q2 FY27", self.queries[0])
+        self.assertNotIn("quantity", json.dumps(self.sent[0]["contents"]))    # no quantities / client data sent
+        self.assertNotIn("tools", self.sent[0])                               # free key: no Google Search tool
+        notes = []
+        self.assertEqual(write_back(notes, uni, matched, self.per), 1)
+        body = [c for c in self.fake.calls if c[0] == "post" and "values:batchUpdate" in c[1]][0][2]
+        got = {d["range"].split("!")[1]: d["values"][0][0] for d in body["data"]}
+        self.assertEqual((got["L1"], got["M1"]), ("Data Source", "Data Updated"))   # new columns after K
+        self.assertEqual((got["C2"], got["G2"], got["J2"], got["K2"]),
+                         ("Pharmaceuticals", a.values["result"], a.values["commentary"], "Q2 FY27"))
+        self.assertTrue(got["L2"].startswith("AI · m1 · Q2FY27"))
+        self.assertFalse(any(k.endswith("3") for k in got))                   # BBB (typed) untouched
+        rows = ai_sourced(matched)
+        self.assertEqual({r["field"] for r in rows}, {"Sector", "Result Line", "Management Commentary"})
+        self.assertTrue(all(r["new"] for r in rows))
+        # the next run reuses the saved answer: no request, no search
+        uni2, matched2 = self._universe()
+        out2 = self._run(matched2)
+        self.assertEqual((out2.requests, out2.searches, len(out2.filled)), (0, 0, 3))
+
+    def test_figures_must_be_in_the_sources(self):
+        uni, matched = self._universe()
+        bad = dict(self.GOOD, revenue_cr=999.0, pat_cr=88.0, commentary="Margins rose to 31.5% in the quarter.")
+        out = self._run(matched, answer=lambda it: bad)
+        a = next(m.uni for m in matched if m.uni.key == "AAA")
+        self.assertEqual(a.values["result"], None)
+        self.assertEqual(a.values["commentary"], None)
+        self.assertEqual(a.values["sector"], "Pharmaceuticals")               # sector needs no source
+        why = " ".join(w for _, w in out.skipped)
+        self.assertIn("not found in the cited sources", why)
+        self.assertIn("commentary has figures not in the cited sources", why)
+
+    def test_not_published_is_asked_again_only_after_retry_days(self):
+        uni, matched = self._universe()
+        out = self._run(matched, answer=lambda it: {"status": "not_published", "quarter": "Q1 FY27",
+                                                    "sector": "Pharmaceuticals"})
+        self.assertEqual(out.requests, 1)
+        self.assertIn("Q2 FY27 results not found yet", out.skipped[0][1])
+        uni2, matched2 = self._universe()
+        out2 = self._run(matched2)                                              # within 3 days: no new request
+        self.assertEqual((out2.requests, out2.searches), (0, 0))
+        wrong = self._run(self._universe()[1], settings={"ai_research_retry_days": 0},   # retry window over
+                          answer=lambda it: dict(self.GOOD, quarter="Q1 FY27"))
+        self.assertEqual(wrong.requests, 1)
+        self.assertIn("not Q2 FY27", " ".join(w for _, w in wrong.skipped))
+        uni3, matched3 = self._universe()
+        out3 = self._run(matched3, settings={"ai_research_retry_days": 0})       # asked again: now found
+        self.assertEqual((out3.requests, len(out3.filled)), (1, 3))
+
+    def test_sector_only_answer_does_not_hold_back_results(self):
+        uni, matched = self._universe()
+        self._run(matched, env={k: v for k, v in self.ENV.items() if k != "TAVILY_API_KEY"})   # sector only
+        uni2, matched2 = self._universe()
+        out = self._run(matched2)                                               # Tavily key added later
+        self.assertEqual((out.requests, out.searches), (1, 1))
+        a = next(m.uni for m in matched2 if m.uni.key == "AAA")
+        self.assertTrue(a.values["result"].startswith("Rev +45.9% YoY"))
+
+    def test_request_limit_and_batches(self):
+        rows = [self.HDR] + [[f"Co{i} Ltd", f"NSE:CO{i}", "", 1, 100 + i, "", "", "", "", "", ""] for i in range(25)]
+        uni, matched = self._universe(rows=rows)
+        out = self._run(matched, settings={"ai_research_batch_size": 10}, budget=2,
+                        answer=lambda it: {"status": "not_published", "sector": "Chemicals"})
+        self.assertEqual(out.requests, 2)
+        self.assertEqual(len(self.queries), 20)
+        limited = [s for s, w in out.skipped if "request limit" in w]
+        self.assertEqual(len(limited), 5)
+        self.assertEqual(limited, ["CO4", "CO3", "CO2", "CO1", "CO0"])        # smallest holdings wait
+
+    def test_modes_without_search_or_key(self):
+        uni, matched = self._universe()
+        env = {k: v for k, v in self.ENV.items() if k != "TAVILY_API_KEY"}
+        out = self._run(matched, env=env)                                       # auto -> sector only
+        a = next(m.uni for m in matched if m.uni.key == "AAA")
+        self.assertEqual((out.requests, out.searches), (1, 0))
+        self.assertEqual((a.values["sector"], a.values["result"]), ("Pharmaceuticals", None))
+        self.assertNotIn("search_extracts", self.sent[0]["contents"][0]["parts"][0]["text"])
+        uni, matched = self._universe()
+        self.assertEqual(self._run(matched, env={}).requests, 0)               # no Gemini key: nothing
+        uni, matched = self._universe()
+        self.assertEqual(self._run(matched, settings={"ai_research": "off"}).requests, 0)
+        uni, matched = self._universe()
+        g = self._run(matched, settings={"ai_research": "gemini"},
+                      answer=lambda it: dict(self.GOOD, sources=[]))
+        self.assertEqual(self.sent[0]["tools"], [{"google_search": {}}])       # paid key: Google Search tool
+        self.assertEqual(g.searches, 0)
+
+    def test_tavily_used_up_stops_searching(self):
+        from crest.ai_research import SearchStopped
+        uni, matched = self._universe()
+
+        def used_up(url, body):
+            raise SearchStopped("Tavily 432: this month's free Tavily searches are used up")
+        out = self._run(matched, tavily=used_up)
+        self.assertTrue(any("used up" in n for n in out.notes))
+        a = next(m.uni for m in matched if m.uni.key == "AAA")
+        self.assertEqual(a.values["sector"], "Pharmaceuticals")
+
+    def test_report_section(self):
+        from crest.report import write_report
+        from crest.shared import RunResult
+        res = RunResult(status="PASSED")
+        res.info.update(ai_research={"requests": 1, "searches": 2, "filled": 3, "skipped": [("XYZ", "not out yet")]},
+                        ai_sourced=[{"symbol": "AAA", "field": "Result Line", "value": "Rev +1.0% YoY", "new": True,
+                                     "period": "Q2FY27", "sources": "https://example.com"}])
+        write_report(res, self.td / "r.md")
+        t = (self.td / "r.md").read_text(encoding="utf-8")
+        self.assertIn("## AI-sourced: review before sending", t)
+        self.assertIn("| XYZ | not out yet |", t)
+
+
 @needs_samples
 class GeminiOutage(unittest.TestCase):
     def test_deck_built_when_gemini_fails(self):

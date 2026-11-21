@@ -10,6 +10,7 @@ from openpyxl.utils import get_column_letter
 
 from . import deck_data as dd
 from . import validate as V
+from . import ai_research
 from .ai_ratings import RatingCache, ai_tag, rating_basis, tag_basis
 from .match import match_holdings
 from .narrative_api import resolve_ai
@@ -95,6 +96,11 @@ def prepare(ctx: Ctx):
     res.info["matched_by"] = {k: sum(1 for m in matched if m.method == k) for k in ("isin", "symbol", "ticker code", "name")}
     _note_dropped_since_step_a(res, bp, matched)
 
+    # 2b. AI research: blank / out-of-date Sector, Result Line and Commentary for the held stocks (before ratings,
+    # which read the result line). One request is kept back for the ratings + narrative request.
+    env = load_env()
+    _research(res, settings, per, env, uni, matched)
+
     # deck group per stock
     valid_groups = set(groups_cfg["group_order"])
 
@@ -122,7 +128,6 @@ def prepare(ctx: Ctx):
     # Views are never set here: they are CREST's own call, from the Universal Sheet only.
     # Saved Gemini ratings are applied here; stocks still unrated are rated later in the run's single Gemini
     # request (step 7), together with the narrative.
-    env = load_env()
     rp = settings.get("rating_provider", "auto")
     ai_on = rp == "gemini" or (rp == "auto" and resolve_ai(env))
     rating_cache, ai_need, ai_to_rate = None, [], []
@@ -232,6 +237,22 @@ def prepare(ctx: Ctx):
     ctx.exc_rows = sorted(res.exceptions, key=lambda e: sev_order.get(e.severity, 3))
     ctx.groups_cfg, ctx.deck_group_of, ctx.uni, ctx.matched, ctx.priced = groups_cfg, deck_group_of, uni, matched, priced
     ctx.env, ctx.ai_on, ctx.rating_cache, ctx.ai_need, ctx.ai_to_rate = env, ai_on, rating_cache, ai_need, ai_to_rate
+
+
+def _research(res, settings, per, env, uni, matched):
+    budget = max(0, int(settings.get("ai_max_requests_per_run", 3)) - 1)
+    out = ai_research.research(matched=matched, per=per, settings=settings, env=env,
+                               cache_path=res.run_dir.parent / "ai_research.json", budget=budget,
+                               say=lambda t: print(t, flush=True))
+    res.notes += out.notes
+    res.info["ai_research"] = {"requests": out.requests, "searches": out.searches, "filled": len(out.filled),
+                               "skipped": out.skipped}
+    if out.filled:
+        ai_research.write_back(res.notes, uni, matched, per)
+    res.info["ai_sourced"] = ai_research.ai_sourced(matched)
+    if res.info["ai_sourced"]:
+        res.notes.append(f"WARN: {len(res.info['ai_sourced'])} Sector / Result Line / Commentary value(s) in this "
+                         "portfolio were written by the AI - review them before sending (report: 'AI-sourced')")
 
 
 def _note_dropped_since_step_a(res, bp, matched):

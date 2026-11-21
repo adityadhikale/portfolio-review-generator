@@ -42,6 +42,11 @@ SCHEMA = {
     # CREST has this cell blank and always wins.
     "rating_source": ("Rating Source", ["Rating Source"], False),
     "rating_reason": ("Rating Reason", ["Rating Reason"], False),
+    # Written by the tool when the AI fills a blank Sector / Result Line / Management Commentary
+    # (crest/ai_research.py): "AI · model · period · fields · source links". Cells CREST types have this blank.
+    # (The sheet's own 'Source' / 'Last Updated' columns belong to CREST's data process and are never written.)
+    "data_source": ("Data Source", ["Data Source"], False),
+    "data_updated": ("Data Updated", ["Data Updated"], False),
 }
 QUARTERLY = ("result", "rating", "sentiment", "commentary")
 RATINGS = ["Excellent", "Good", "Average", "Weak"]

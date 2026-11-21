@@ -91,20 +91,26 @@ class GeminiClient:
         self.model = self.models[0]       # after generate(): the model that answered
         self.tried: list[str] = []        # "model: reason" for every model that could not answer
         self.last_bad_reply = ""          # raw text of the last unreadable reply (saved by the pipeline)
+        self.last_grounding: dict = {}    # groundingMetadata of the last answer (web search sources), if any
         self._post = post or self._http_post  # post(url, body) -> response dict; replaced in tests
         self._sleep = sleep
 
-    def generate_json(self, system: str, contents: list, temperature: float = 0.4) -> dict:
+    def generate_json(self, system: str, contents: list, temperature: float = 0.4, tools=None) -> dict:
         """Like generate(), but the reply must be a JSON object. A model whose reply cannot be read as one is
         treated like a busy model: the same request goes to the next model in the list."""
-        return self.generate(system, contents, temperature, parse=parse_json_object)
+        return self.generate(system, contents, temperature, parse=parse_json_object, tools=tools)
 
-    def generate(self, system: str, contents: list, temperature: float = 0.4, parse=None):
+    def generate(self, system: str, contents: list, temperature: float = 0.4, parse=None, tools=None):
         """One request that must return JSON text, sent to the first model in the list that can answer.
-        parse(text) may convert the reply; if it raises ValueError the next model is tried."""
-        body = {"systemInstruction": {"parts": [{"text": system}]},
-                "contents": contents,
-                "generationConfig": {"responseMimeType": "application/json", "temperature": temperature}}
+        parse(text) may convert the reply; if it raises ValueError the next model is tried.
+        tools: e.g. [{"google_search": {}}] (web search; needs a paid key). With tools the JSON reply mode is off
+        (the API does not combine them), so the prompt must ask for JSON and parse() reads it."""
+        gen = {"temperature": temperature}
+        if not tools:
+            gen["responseMimeType"] = "application/json"
+        body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": contents, "generationConfig": gen}
+        if tools:
+            body["tools"] = tools
         for attempt in range(2):
             if attempt:
                 print(f"  All Gemini models busy; trying the list again in {PASS_WAIT}s ...", flush=True)
@@ -117,6 +123,7 @@ class GeminiClient:
                     print(f"  Gemini {m} unavailable ({e}); switching model ...", flush=True)
                     continue
                 text = self._text(resp)
+                self.last_grounding = (resp.get("candidates") or [{}])[0].get("groundingMetadata") or {}
                 if parse is not None:
                     try:
                         out = parse(text)

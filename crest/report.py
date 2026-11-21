@@ -38,6 +38,23 @@ def write_report(res, path: Path):
               f"- Matched to Universal Sheet: **{sum(mb.values())}** (by ISIN {mb.get('isin', 0)}, by symbol {mb.get('symbol', 0)}, by ticker code "
               f"{mb.get('ticker code', 0)}, by exact name {mb.get('name', 0)})",
               f"- Unmatched / ambiguous: **{n_exc}**", ""]
+    ar = i.get("ai_research")
+    if ar and (ar["requests"] or ar["skipped"]):
+        L += ["## AI research (Sector, Result Line, Commentary)", "",
+              f"- Requests to the AI: **{ar['requests']}**; web searches: **{ar['searches']}**; values filled: "
+              f"**{ar['filled']}**", ""]
+        if ar["skipped"]:
+            L += ["| Symbol | Not filled because |", "|---|---|"] + [f"| {_esc(a)} | {_esc(b)} |" for a, b in ar["skipped"]]
+            L.append("")
+    if i.get("ai_sourced"):
+        L += ["## AI-sourced: review before sending", "",
+              "These values were written by the AI, not typed by CREST. Check them against the sources before the "
+              "deck goes to the client; correct a value by typing over it in the Universal Sheet and clearing that "
+              "row's Data Source.", "", "| Symbol | Field | Value | Quarter | New this run | Sources |", "|---|---|---|---|---|---|"]
+        for r in i["ai_sourced"]:
+            L.append(f"| {_esc(r['symbol'])} | {r['field']} | {_esc(r['value'])} | {_esc(r['period'])} | "
+                     f"{'yes' if r['new'] else ''} | {_esc(r['sources'])} |")
+        L.append("")
     steps = list(dict.fromkeys(getattr(c, "step", "") for c in res.checks))
     for st in steps:
         L += [f"## Checks: {st}" if st else "## Validation and QA checks", "", "| Check | Result | Detail |",

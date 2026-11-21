@@ -90,7 +90,7 @@ Client data and CREST research never go to GitHub; `.gitignore` excludes them. A
 | File | Purpose |
 |---|---|
 | `secrets/google-service-account.json` | The Google service-account key (see [Google Sheets setup](#google-sheets-setup)) |
-| `.env` | Google Sheet ID, narrative API key and models (copy `.env.example`) |
+| `.env` | Google Sheet ID, narrative API key and models, Tavily search key (copy `.env.example`) |
 | `templates/universal-sheet.xlsx` | Local copy of the Universal Sheet: offline fallback until Google Sheets is set up, and for tests. Never written by the tool |
 | `templates/Deck_-_template.pptx` | The CREST deck template |
 | `input/*` | Filled holdings templates (client data) |
@@ -115,6 +115,7 @@ crest/                     the pipeline
   ratings.py               draft Rating / Sentiment rules
   narrative_api.py         narrative API client (model list, switching on busy / bad replies)
   ai_review.py             the single API request per client: ratings + narrative
+  ai_research.py           AI fills blank Sector / Result Line / Commentary (web search, checks, write-back)
   ai_ratings.py            per-quarter backup of API ratings (runs/<period>/ai_ratings.json)
   sheet_source.py          Universal Sheet source: Google Sheets API (read, write-back) or local file; snapshots
   deck_data.py             numbers for the deck, read back from the Excel
@@ -198,6 +199,7 @@ Blank layout with a column guide: `templates/Universal_Sheet_template.xlsx` (Leg
 | Symbol, Alt Symbols, ISIN | optional | used for matching holdings |
 | Q Result Period | optional | e.g. `Q2 FY27`; sets the run period, and a mismatch stops the run |
 | Short Name, Deck Group, Exchange, Instrument Type | optional | display name, group override, ETF flag (`Sector = ETF` also works) |
+| Data Source, Data Updated | written by the tool | added when the AI fills a blank Sector / Result Line / Commentary: model, quarter, which fields, source links; leave blank for values you type. The sheet's own Source / Last Updated columns are never written |
 | Rating Source, Rating Reason | written by the tool | added when the narrative API fills a blank Rating / Sentiment (source, period and a change code); leave blank for ratings you type |
 
 **Where it is read from.** The Universal Sheet lives in Google Sheets, where GOOGLEFINANCE keeps price and market cap
@@ -246,6 +248,48 @@ Done once by CREST. The key file is a password: never paste it into a chat or an
 
 Tip: test the write-back on a **copy** of the sheet first (share the copy the same way and put the copy's ID in
 `.env`), then switch the ID to the real sheet.
+
+## AI research: Sector, Result Line, Commentary
+
+For the stocks held in the portfolio being run, the AI fills, before ratings:
+
+* **Sector** when it is blank, choosing only a sector the deck knows (`config/sector_groups.json`);
+* **Result Line** and **Management Commentary** when they are blank, or were written by the AI earlier for an
+  older quarter.
+
+A value CREST typed is never changed. A row whose typed result is for another quarter is left alone (the period
+check flags it). Views are never touched.
+
+**How it searches** (`ai_research` in `config/settings.json`):
+
+| Setting | What happens | Needs |
+|---|---|---|
+| `auto` (default) | `tavily` when `.env` has `TAVILY_API_KEY`, else `sector_only` | |
+| `tavily` | a Tavily web search per stock, then one Gemini request per batch reads the search extracts | free Gemini key + free Tavily key (1,000 searches a month, app.tavily.com) |
+| `gemini` | Gemini searches with Google Search itself | a Gemini key with billing turned on |
+| `sector_only` | blank Sectors only, no web search; results stay "Results awaited" | free Gemini key |
+| `off` | nothing | |
+
+Only company names and tickers are sent, never client data.
+
+**Checks before a value is used.** The answer must be for the run's quarter (otherwise "results awaited"), and
+must give source links. The Result Line is built by the tool in the house format from the returned figures, e.g.
+`Rev +45.9% YoY (Rs 610cr); PAT +153.6% YoY (Rs 71cr)`, and must be readable by the rating rules. With Tavily,
+the revenue or profit figure must appear in the cited search extracts, and every figure in the commentary too;
+otherwise that value is rejected and listed in the report.
+
+**Limits.** Batches of `ai_research_batch_size` stocks (10) per request, largest holdings first, and at most
+`ai_max_requests_per_run` Gemini requests per client run (3), with one always kept for the ratings + narrative
+request. Stocks over the limit are researched on the next run.
+
+**Saved answers.** `runs\<period>\ai_research.json` keeps every answer: a stock's result for a quarter is never
+asked for twice, and "not published yet" is asked again after `ai_research_retry_days` (3). New values are
+written to the Google Sheet with **Data Source** (`AI · model · quarter · fields · source links`) and **Data
+Updated**.
+
+**Review.** `report.md` lists every AI-written value among the client's holdings under **"AI-sourced: review
+before sending"**, with its sources, and what could not be filled and why. To correct a value, type over it in
+the Universal Sheet and clear that row's Data Source.
 
 ## Rating and Sentiment rules
 
@@ -305,7 +349,7 @@ not read, and the run warns about them.
 
 | File | Purpose |
 |---|---|
-| `config/settings.json` | narrative checks, tolerances, table split sizes |
+| `config/settings.json` | AI research and request limits, narrative checks, tolerances, table split sizes |
 | `config/sector_groups.json` | sector (Screener industry) → deck group, group order, per-stock overrides |
 | `config/sector_rules.json` | name keywords → plausible sectors (sanity check) |
 | `config/rating_rules.json` | draft rating rules (inactive until approved) |
