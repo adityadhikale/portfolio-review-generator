@@ -39,7 +39,8 @@ The goal is a **core tool, used by CREST staff through a website**, where:
 | Client name and as-on date | Two labelled cells at the top of the template |
 | Template columns | ISIN, Symbol, Company Name, Quantity, Average Price. No price column: prices come live from the Universal Sheet |
 | Steps | A and B are separate actions on the website. A third action, "Both", runs them together |
-| AI | Paid narrative-API key with web search. Small batches, saved and reused, with a limit per run. This replaces the old "at most one request per run" rule |
+| AI | Small batches, saved and reused, with a limit per run. This replaces the old "at most one request per run" rule. Web search: a free Tavily key, read by the free narrative-API key (the free key cannot search itself); the narrative API's own search stays available for a paid key (decided 21/11/2026) |
+| Website | A Python API (FastAPI) around the pipeline, and a Vue 3 front end with shadcn-vue components, Motion for Vue animation and Tailwind, in CREST's colours. Not Streamlit (decided 21/11/2026: too plain for staff use) |
 | Typed values | Anything CREST types in the Universal Sheet always wins over AI |
 | GOOGLEFINANCE lag and gaps | Acceptable for client output |
 | Users | CREST staff only. Login is added later |
@@ -57,7 +58,8 @@ The goal is a **core tool, used by CREST staff through a website**, where:
 | AI review | Rating and Sentiment for unrated stocks, and the deck narrative (as today) |
 | Step A, Portfolio | Matches holdings to the Universal Sheet, runs the checks, builds the Portfolio Excel |
 | Step B, Deck | Reads holdings from a Portfolio Excel or a template, takes fresh data from the Universal Sheet, builds PPT and PDF |
-| Website | Three tabs: Portfolio, Deck, Both |
+| Website API (FastAPI) | Takes uploads, runs Step A / Step B / both one at a time, streams progress, serves the results |
+| Website front end (Vue) | Upload, live progress, results and review screens, run history |
 | Command line | `python run.py` still works: every template in `input\` goes through Step A and Step B |
 
 Flow: **template → Step A → Portfolio Excel → Step B → PPT + PDF**, with both steps reading the live Universal
@@ -182,20 +184,37 @@ Needs the paid narrative-API key.
 
 Runs locally first.
 
-- A Streamlit app with three tabs:
-  - **Portfolio:** download the blank template; upload a filled template; download the Portfolio Excel.
-  - **Deck:** upload a Portfolio Excel or a template; download the PPT and PDF.
-  - **Both:** upload a template; download the Excel, PPT and PDF.
-- Every run shows its status (Passed, Passed with warnings, Failed), the checks, the exceptions and the
-  AI-sourced fields to review.
+Two parts, in one repository: the Python pipeline stays exactly as it is, with a thin API in front of it, and a
+separate Vue front end talks to that API.
+
+- **API (FastAPI, `crest/api.py`):**
+  - Download the blank holdings template.
+  - Start a run: upload a file and choose Portfolio, Deck or Both. Runs go into a queue and run one at a time,
+    because LibreOffice and the Universal Sheet write-back must not run twice at once; a waiting run shows its
+    place in the queue.
+  - Live progress while a run works (reading the sheet, AI research, ratings, Excel, deck, PDF), sent to the
+    page as it happens.
+  - The finished run: status, checks by step, exceptions, the AI-sourced values to review, notes, and download
+    links for the Excel, PPT, PDF and report.
+  - Run history, and the Universal Sheet connection status (Google live, or the snapshot in use).
+  - The pipeline gains one small hook to report which stage it is on; nothing else in it changes.
+- **Front end (Vue 3 + Vite + TypeScript, `web/`):** shadcn-vue components, Motion for Vue animation, Tailwind
+  styling, in CREST's colours and fonts.
+  - **New run:** three cards (Portfolio, Deck, Both), a drag-and-drop upload area, and the blank template download.
+  - **Run in progress:** an animated step-by-step timeline with the current stage and elapsed time.
+  - **Results:** a status banner, download buttons, checks grouped by step, the exceptions table, and the
+    AI-sourced review table with source links.
+  - **History:** past runs by client and period, with their status and files.
 - Each upload runs in its own folder under `runs\`. No client data leaves the server except the trimmed,
   anonymous narrative input already sent today.
-- Started with `streamlit run app.py`.
+- **Starting it:** one command, `python serve.py`, serves the API and the built front end at
+  `http://localhost:8000`. For front-end work, `npm run dev` gives live reload against the same API.
+- Node.js is needed only to build the front end; the built files are plain HTML, CSS and JavaScript.
 
 ### Phase 6: Later (not in this build)
 
 - Google sign-in limited to `@crest-group.co` accounts.
-- A container image with LibreOffice, deployed to Google Cloud Run.
+- A container image with LibreOffice and the built front end, deployed to Google Cloud Run.
 - The run archive kept in Google Cloud Storage instead of on the server's disk.
 
 ## 7. What is kept and what is removed
@@ -223,8 +242,9 @@ Universal Sheet as the source of truth (it stays only as an offline fallback and
   current sheet. Excel numbers and deck tables must match the earlier Q2 FY27 run for the same prices.
 - **Google:** read the shared sheet (about 5,334 rows, with the count of `#N/A` prices reported); test the
   write-back on a copy of the sheet first, then run a full client against the live sheet.
-- **Website:** upload a template and download the Excel; upload that Excel and download the PPT and PDF; run
-  "Both" and confirm the Excel and the deck show the same numbers.
+- **Website:** API tests for upload, queueing, progress and downloads (no network); then in the browser: upload a
+  template and download the Excel; upload that Excel and download the PPT and PDF; run "Both" and confirm the
+  Excel and the deck show the same numbers; check the screens at desktop and laptop widths.
 - Code lint check clean.
 
 ## 9. What CREST provides, and when

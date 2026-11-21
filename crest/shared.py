@@ -71,6 +71,11 @@ class Ctx:
     xlsx: Path | None = None     # set by Step A
     layout: object = None
     exc_rows: list = field(default_factory=list)
+    progress: object = None      # progress(stage key) -> None; the website shows the stage live
+
+    def stage(self, key: str):
+        if self.progress:
+            self.progress(key)
 
 
 def prepare(ctx: Ctx):
@@ -86,6 +91,7 @@ def prepare(ctx: Ctx):
     res.notes += bp.notes
 
     # 2. universal + match
+    ctx.stage("match")
     uni = load_universe(universal)
     res.info.update(universal_rows=len(uni.rows), universal_header_row=uni.header_row, universal_sheet=uni.sheet)
     for w in uni.warnings:
@@ -96,6 +102,7 @@ def prepare(ctx: Ctx):
     res.info["matched_by"] = {k: sum(1 for m in matched if m.method == k) for k in ("isin", "symbol", "ticker code", "name")}
     _note_dropped_since_step_a(res, bp, matched)
 
+    ctx.stage("research")
     # 2b. AI research: blank / out-of-date Sector, Result Line and Commentary for the held stocks (before ratings,
     # which read the result line). One request is kept back for the ratings + narrative request.
     env = load_env()

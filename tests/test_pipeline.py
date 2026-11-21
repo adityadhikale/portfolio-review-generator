@@ -10,6 +10,7 @@ import json
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -719,6 +720,95 @@ class AIResearch(unittest.TestCase):
         t = (self.td / "r.md").read_text(encoding="utf-8")
         self.assertIn("## AI-sourced: review before sending", t)
         self.assertIn("| XYZ | not out yet |", t)
+
+
+class WebAPI(unittest.TestCase):
+    """The website API with a stand-in pipeline: upload, queue, live progress, results, downloads."""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        from crest.api import create_app
+        self.td = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.td, True)
+        self.calls = []
+
+        def runner(job, folder, progress):
+            self.calls.append(job["step"])
+            for k in ("sheet", "match", "excel"):
+                progress(k)
+            if job["filename"].startswith("bad"):
+                raise PipelineError("Cell C2: the client name is blank. Type the client's name.")
+            (folder / "files").mkdir(exist_ok=True)
+            (folder / "files" / "Acme Portfolio.xlsx").write_bytes(b"xlsx-bytes")
+            return {"status": "PASSED", "client": "Acme", "period": "Q2 FY27", "checks": [], "exceptions": [],
+                    "notes": [], "ai_sourced": [], "files": [{"kind": "excel", "label": "Portfolio Excel",
+                                                              "name": "Acme Portfolio.xlsx", "size": 10}]}
+        self.app = create_app(runner=runner, jobs_dir=self.td, serve_web=False)
+        self.c = TestClient(self.app)
+
+    def _upload(self, name="Acme.xlsx", step="both", data=b"PK fake"):
+        return self.c.post("/api/runs", data={"step": step}, files={"file": (name, data, "application/octet-stream")})
+
+    def _wait(self, jid):
+        for _ in range(200):
+            j = self.c.get(f"/api/runs/{jid}").json()
+            if j["status"] in ("done", "failed"):
+                return j
+            time.sleep(0.02)
+        self.fail("run did not finish")
+
+    def test_status_and_template(self):
+        st = self.c.get("/api/status").json()
+        self.assertTrue({"universal", "google", "ai", "web_search", "libreoffice", "queue"} <= set(st))
+        r = self.c.get("/api/template")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("CREST_Holdings_Template.xlsx", r.headers["content-disposition"])
+
+    def test_upload_run_and_download(self):
+        r = self._upload(step="portfolio")
+        self.assertEqual(r.status_code, 201)
+        j = r.json()
+        self.assertEqual([s["key"] for s in j["stages"]], ["sheet", "match", "research", "excel", "check"])
+        done = self._wait(j["id"])
+        self.assertEqual((done["status"], done["client"], done["period"]), ("done", "Acme", "Q2 FY27"))
+        self.assertEqual(self.calls, ["portfolio"])
+        f = self.c.get(f"/api/runs/{j['id']}/files/Acme Portfolio.xlsx")
+        self.assertEqual((f.status_code, f.content), (200, b"xlsx-bytes"))
+        self.assertEqual(self.c.get(f"/api/runs/{j['id']}/files/..%2Fjob.json").status_code, 404)
+        self.assertEqual(self.c.get(f"/api/runs/{j['id']}/files/other.pdf").status_code, 404)
+        hist = self.c.get("/api/runs").json()
+        self.assertEqual((hist[0]["id"], hist[0]["run_status"], hist[0]["files"]),
+                         (j["id"], "PASSED", ["Acme Portfolio.xlsx"]))
+
+    def test_events_stream_ends_when_done(self):
+        j = self._upload().json()
+        with self.c.stream("GET", f"/api/runs/{j['id']}/events") as r:
+            msgs = [json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: ")]
+        self.assertEqual(msgs[-1]["status"], "done")
+        self.assertTrue(all(m["id"] == j["id"] for m in msgs))
+
+    def test_failed_run_keeps_the_message(self):
+        done = self._wait(self._upload(name="bad.xlsx").json()["id"])
+        self.assertEqual(done["status"], "failed")
+        self.assertIn("Cell C2", done["error"])
+
+    def test_rejects_bad_uploads(self):
+        self.assertEqual(self._upload(name="h.csv").status_code, 422)
+        self.assertEqual(self._upload(data=b"").status_code, 422)
+        self.assertEqual(self._upload(step="everything").status_code, 422)
+        self.assertEqual(self.c.get("/api/runs/nope").status_code, 404)
+        self.assertEqual(self.calls, [])
+
+    def test_restart_marks_unfinished_runs_failed(self):
+        from crest.api import create_app
+        from fastapi.testclient import TestClient
+        d = self.td / "20260101-000000-abcdef"
+        d.mkdir()
+        (d / "job.json").write_text(json.dumps({"id": d.name, "status": "running", "step": "both"}), encoding="utf-8")
+        c = TestClient(create_app(runner=lambda *a: {}, jobs_dir=self.td, serve_web=False))
+        j = c.get(f"/api/runs/{d.name}").json()
+        self.assertEqual(j["status"], "failed")
+        self.assertIn("restarted", j["error"])
 
 
 @needs_samples

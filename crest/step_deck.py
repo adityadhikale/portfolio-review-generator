@@ -51,6 +51,7 @@ def build_deck(ctx: Ctx, excel_vals: dict | None = None):
     (out / "narrative_template.json").write_text(json.dumps(blank_template(), indent=2), encoding="utf-8")
     res.outputs["narrative_input"] = out / "narrative_input.json"
 
+    ctx.stage("ai")
     # 7. narrative + Gemini. A saved narrative.json is always used as-is. Missing ratings and a missing narrative
     # are requested from Gemini together, in ONE request (none at all when nothing is missing).
     nar = ManualProvider(Path(narrative_path)).get(ni)
@@ -129,6 +130,7 @@ def build_deck(ctx: Ctx, excel_vals: dict | None = None):
                                 "exact fields) and re-run; a saved narrative.json is not sent to Gemini again.")
 
     # 8. deck
+    ctx.stage("deck")
     deck = out / f"{safe_filename(client).replace(' ', '_')}_CREST_Portfolio_{per.compact}_Review.pptx"
     fill = fill_deck(template, deck, data=data, narrative=nar, period=per, client=client, asof=asof,
                      dcfg=settings["deck"], ratings_by_ai=ai_on)
@@ -140,6 +142,7 @@ def build_deck(ctx: Ctx, excel_vals: dict | None = None):
         res.checks.append(V.Check("Narrative structure", "FAIL", f"{len(fill['problems'])} problem(s)", fill["problems"]))
 
     # 9. QA
+    ctx.stage("qa")
     q = run_qa(deck, settings["deck"]["pending_marker"], client, per.label)
     res.qa = q
     res.checks.append(V.simple("No leftover template placeholders", q["placeholders"], fail=True))

@@ -74,6 +74,36 @@ A run has two steps, which can also be run on their own, so a deck can be made w
 
 ---
 
+## Website
+
+Staff can do everything from a browser: choose **Portfolio Excel**, **Review deck** or **Excel and deck**, drop in the
+file, watch the run step by step, then download the Excel, PPT, PDF and report and review the checks, exceptions
+and AI-written values. Every run stays in **History** with its files.
+
+Build the front end once (and again after any change in `web\`), then start the server:
+
+```powershell
+cd web; npm install; npm run build; cd ..
+```
+
+```powershell
+python serve.py
+```
+
+Open **http://localhost:8000**. `python serve.py --host 0.0.0.0` makes it reachable from other machines on the
+office network (there is no login yet; that is Phase 6).
+
+| Part | What it is |
+|---|---|
+| `crest/api.py` | FastAPI: upload, run queue (one run at a time), live progress (server-sent events), results, downloads, history; API docs at `/api/docs` |
+| `serve.py` | Starts the API and serves the built front end |
+| `web/` | Vue 3 + Vite + TypeScript, shadcn-vue components, Motion for Vue, Tailwind; CREST colours and Maharlika headings from the deck |
+| `runs\_web\<run>\` | Each website run: the upload, `job.json`, and a copy of its result files (history downloads never change) |
+
+**Front-end development:** with `python serve.py` running, `cd web` then `npm run dev` serves the front end at
+http://localhost:5173 with live reload, forwarding `/api` to the Python server. Node.js 20+ is needed only to build
+the front end.
+
 ## Requirements
 
 * Python 3.11+ and `pip install -r requirements.txt` (openpyxl, python-pptx, pymupdf, google-auth, requests).
@@ -103,7 +133,8 @@ Client data and CREST research never go to GitHub; `.gitignore` excludes them. A
 ## Folder layout
 
 ```
-run.py                     entry point (python run.py)
+run.py                     command line (python run.py)
+serve.py                   website (python serve.py)
 crest/                     the pipeline
   holdings.py              reads and checks the holdings template (duplicate merge, exact-cell errors)
   portfolio_reader.py      reads holdings back from a Portfolio Excel for Step B (columns found by header name)
@@ -122,6 +153,7 @@ crest/                     the pipeline
   narrative.py             narrative template, saved narrative.json, number and style checks
   deck_fill.py             fills the PowerPoint template
   qa.py                    deck QA (placeholders, style, overflow, render)
+  api.py                   website API (FastAPI): uploads, run queue, live progress, downloads
   pipeline.py              runs shared setup, then Step A and/or Step B; archives and publishes each run
   shared.py                shared setup: Universal Sheet, matching, ratings, deck groups, data checks, exceptions
   step_portfolio.py        Step A: Portfolio Excel, LibreOffice cross-check, validation gate
@@ -131,6 +163,7 @@ config/                    settings, sector groups, sanity rules, rating rules
 templates/                 Holdings_Template.xlsx and Universal_Sheet_template.xlsx (blank, in git);
                            live sheet and deck template (private)
 input/  output/  runs/     client files in, results out, full run archive
+web/                       website front end (Vue); web/dist is the build
 tests/                     unit + end-to-end tests
 tools/                     developer helpers (holdings template, test fixtures, comparison with reference files)
 ```

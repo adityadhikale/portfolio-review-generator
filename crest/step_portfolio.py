@@ -14,6 +14,7 @@ def build_portfolio(ctx: Ctx) -> dict:
     client, asof, bp = ctx.client, ctx.asof, ctx.hf
     priced, matched, exc_rows, deck_group_of = ctx.priced, ctx.matched, ctx.exc_rows, ctx.deck_group_of
     # 4. Excel
+    ctx.stage("excel")
     xlsx = out / f"{client} Portfolio.xlsx"
     layout = build_workbook(xlsx, client=client, asof=asof, period_label=per.label, parse=bp,
                             priced=priced, snapshot_rows=matched, exception_rows=exc_rows, deck_group_of=deck_group_of)
@@ -23,6 +24,7 @@ def build_portfolio(ctx: Ctx) -> dict:
     res.info["libreoffice"] = soffice or "not found"
     py = dd.python_values(priced)
     if soffice:
+        ctx.stage("check")
         # The delivered workbook carries Google-Sheets GOOGLEFINANCE formulas (Market Cap, CMP) that LibreOffice
         # cannot evaluate (and would rewrite). So a check copy with this run's values in those two columns is
         # recalculated instead; every other formula is identical. The delivered file is left untouched.

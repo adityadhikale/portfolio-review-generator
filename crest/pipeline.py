@@ -50,11 +50,13 @@ def read_holdings(path: Path, step: str):
 
 
 def run(*, period, universal, holdings, template=None, narrative=None, runs_dir=None, settings_path=None,
-        render_png=True, publish_dir=None, step="both") -> RunResult:
+        render_png=True, publish_dir=None, step="both", progress=None) -> RunResult:
     """holdings: a filled holdings template, or (step 'deck' only) a Portfolio Excel built by Step A. The client
     name and the as-on date are read from it; prices always come from the Universal Sheet.
     universal: a UniversalSheet (crest/sheet_source.py: Google Sheets with snapshot fallback; pass the same one to
-    every run of a batch so all of them use one read), or a path to a local .xlsx."""
+    every run of a batch so all of them use one read), or a path to a local .xlsx.
+    progress: optional progress(stage) callback; stages in order: sheet, match, research, excel, check, ai, deck,
+    qa (only those the chosen step uses)."""
     if step not in STEPS:
         raise PipelineError(f"step must be one of {', '.join(STEPS)}, got '{step}'")
     settings = load_json(Path(settings_path) if settings_path else CONFIG_DIR / "settings.json")
@@ -86,9 +88,11 @@ def run(*, period, universal, holdings, template=None, narrative=None, runs_dir=
     if step != "portfolio":
         res.info.update(template=template.name, narrative_path=str(narrative_path))
     ctx = Ctx(res=res, step=step, settings=settings, per=per, client=hf.client, asof=hf.asof, universal=universal,
-              template=template, narrative_path=narrative_path, hf=hf, out=out, render_png=render_png)
+              template=template, narrative_path=narrative_path, hf=hf, out=out, render_png=render_png,
+              progress=progress)
     current = "shared"
     try:
+        ctx.stage("sheet")
         _universal_info(res, universal, per)
         prepare(ctx)
         _tag(res, current)
