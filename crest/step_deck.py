@@ -17,7 +17,7 @@ from .narrative_api import GeminiClient
 from .office import find_soffice
 from .qa import render, run_qa
 from .shared import Ctx, _set_ai_rating, _write_ai_ratings_md, _write_back_to_sheet, gate, python_excel_values
-from .util import PipelineError, safe_filename
+from .util import PipelineError, hosted, safe_filename
 
 
 def build_deck(ctx: Ctx, excel_vals: dict | None = None):
@@ -156,6 +156,8 @@ def build_deck(ctx: Ctx, excel_vals: dict | None = None):
         res.outputs["pdf"] = pdf
         res.outputs["png_dir"] = out / "render" / "png"
         res.checks.append(V.simple("Rendered text stays on the page", offpage))
+    elif hosted():
+        res.notes.append("PDF: open the PowerPoint and use File > Save as PDF (the hosted website makes the PPT only).")
     if any(c.status == "FAIL" for c in res.checks):
         raise PipelineError("Deck QA failed - see the checks table.")
     res.status = "PASSED WITH WARNINGS" if any(c.status == "WARN" for c in res.checks) or fill["pending"] else "PASSED"

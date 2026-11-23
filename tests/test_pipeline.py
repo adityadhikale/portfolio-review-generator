@@ -343,6 +343,7 @@ class FakeGoogle:
         self.columns = columns
         self.cells = cells or {}          # A1 -> value, for the check before writing
         self.calls = []
+        self.post_failures = 0            # writes answered with a 503 before one succeeds
 
     def get(self, url, timeout=None):
         self.calls.append(("get", url, None))
@@ -357,11 +358,20 @@ class FakeGoogle:
         if "fields=sheets.properties" in url:
             return self.Resp(200, {"sheets": [{"properties": {"sheetId": 7, "title": "Universal",
                                                               "gridProperties": {"columnCount": self.columns}}}]})
+        if "majorDimension=COLUMNS" in url:                 # one whole column, from `cells` (to find moved rows)
+            import re
+            from urllib.parse import unquote
+            col = re.search(r"!([A-Z]+):", unquote(url)).group(1)
+            mine = {int(k[len(col):]): v for k, v in self.cells.items() if re.fullmatch(col + r"\d+", k)}
+            return self.Resp(200, {"values": [[mine.get(i) for i in range(1, max(mine, default=0) + 1)]]})
         rows = self.reads.pop(0) if len(self.reads) > 1 else self.reads[0]
         return self.Resp(200, {"values": rows})
 
     def post(self, url, timeout=None, json=None):
         self.calls.append(("post", url, json))
+        if self.post_failures:
+            self.post_failures -= 1
+            return self.Resp(503, {"error": {"message": "backend busy"}})
         return self.Resp(200, {})
 
 
@@ -395,6 +405,32 @@ class GoogleSheetSource(unittest.TestCase):
         self.assertEqual(len([c for c in us.source._session.calls if c[0] == "get"]), 1)   # read once
         self.assertEqual(waits, [])
         self.assertTrue(us.data().live)
+
+    def test_settings_from_environment(self):
+        """A host has no .env and no key file: settings come from the environment, the key as its contents."""
+        import os
+        from crest.sheet_source import GoogleSheet, open_universal
+        from crest.util import load_env
+        env = {"UNIVERSAL_SHEET_ID": "sheet-id-env", "TAVILY_API_KEY": "t", "CREST_HOSTED": "1",
+               "GOOGLE_CREDENTIALS_JSON": '{"type": "service_account", "client_email": "x@y"}'}
+        with mock.patch.dict(os.environ, env):
+            got = load_env(self.td / "no.env")
+        self.assertEqual({k: got.get(k) for k in env}, env)
+        us = open_universal(got, runs_dir=self.td)
+        self.assertEqual((us.source.sheet_id, us.source.credentials_json), ("sheet-id-env", env["GOOGLE_CREDENTIALS_JSON"]))
+
+        class Creds:
+            @staticmethod
+            def from_service_account_info(info, scopes):
+                return ("info", info["client_email"])
+
+            @staticmethod
+            def from_service_account_file(path, scopes):
+                return ("file", path)
+        self.assertEqual(us.source._credentials(Creds), ("info", "x@y"))
+        self.assertEqual(GoogleSheet("s", credentials_file=self.td / "k.json")._credentials(Creds)[0], "file")
+        with self.assertRaises(PipelineError):
+            GoogleSheet("s", credentials_json="not json")._credentials(Creds)
 
     def test_loading_read_again_once(self):
         loading = [self.ROWS[0], self.ROWS[1][:4] + ["Loading..."] + self.ROWS[1][5:], self.ROWS[2]]
@@ -449,6 +485,27 @@ class GoogleSheetSource(unittest.TestCase):
                          {"'Universal'!L1": "Rating Source", "'Universal'!H2": "Good",
                           "'Universal'!L2": "AI · m · Q2FY27 · ab"})
         self.assertTrue(any("[3]" in n for n in us.notes()))
+
+    def test_write_follows_moved_rows_and_retries(self):
+        """Rows sorted since the read: the stock is found again by name and written at its new row. A brief Google
+        error while writing is retried, so the answers are not left only in local files."""
+        fake = FakeGoogle([self.ROWS], cells={"A1": "Name", "A2": "Ccc Ltd", "A3": "Aaa Ltd", "A4": "Bbb Ltd",
+                                               "A5": "Ddd Ltd", "A6": "Ddd Ltd"})
+        fake.post_failures = 1
+        us, waits = self._sheet(fake)
+        us.data()
+        n = us.write({2: {"H": "Good"}, 3: {"H": "Weak"}, 7: {"H": "Average"}},
+                     expect={2: ("A", "Aaa Ltd"), 3: ("A", "Bbb Ltd"), 7: ("A", "Ddd Ltd")})
+        self.assertEqual(n, [3, 4])                     # Aaa now on row 3, Bbb on row 4; Ddd twice: not written
+        body = [c for c in fake.calls if c[0] == "post" and "values:batchUpdate" in c[1]][-1][2]
+        self.assertEqual({d["range"]: d["values"][0][0] for d in body["data"]},
+                         {"'Universal'!H3": "Good", "'Universal'!H4": "Weak"})
+        self.assertEqual(len([c for c in fake.calls if c[0] == "post"]), 2)    # failed once, then written
+        self.assertEqual(waits, [5.0])
+        notes = " ".join(us.notes())
+        self.assertIn("found by company name", notes)
+        self.assertIn("[7]", notes)
+        self.assertIn("tried again", notes)
 
     def test_local_file_is_read_only_and_source_choice(self):
         from crest.sheet_source import GoogleSheet, LocalSheet, ReadOnlySheet, open_universal
@@ -611,6 +668,21 @@ class AIResearch(unittest.TestCase):
         rows = ai_sourced(matched)
         self.assertEqual({r["field"] for r in rows}, {"Sector", "Result Line", "Management Commentary"})
         self.assertTrue(all(r["new"] for r in rows))
+        # the Portfolio Excel's References sheet lists the same values with clickable sources, and AI ratings
+        from crest.ai_research import ai_rated
+        from crest.excel_build import _references
+        b = next(m.uni for m in matched if m.uni.key == "BBB")
+        b.rating, b.sentiment, b.rating_source, b.ai_rating_reason = "Buy", "Positive", "AI (Gemini)", "PAT up 40%."
+        self.assertEqual([(x["symbol"], x["rating"], x["reason"]) for x in ai_rated(matched)],
+                         [("BBB", "Buy", "PAT up 40%.")])
+        ws = openpyxl.Workbook().active
+        _references(ws, matched)
+        cells = [[c.value for c in row] for row in ws.iter_rows()]
+        aaa = [row for row in cells if row[0] == "AAA"]
+        self.assertEqual({row[2] for row in aaa}, {"Sector", "Result Line", "Management Commentary"})
+        link = next(c for row in ws.iter_rows() for c in row if c.value == "https://example.com/aaa-q2")
+        self.assertEqual(link.hyperlink.target, "https://example.com/aaa-q2")
+        self.assertIn(["BBB", b.values["name"], "Buy · Positive", "PAT up 40%."], [row[:4] for row in cells])
         # the next run reuses the saved answer: no request, no search
         uni2, matched2 = self._universe()
         out2 = self._run(matched2)
@@ -695,6 +767,41 @@ class AIResearch(unittest.TestCase):
         uni3, matched3 = self._universe()
         out3 = self._run(matched3, settings={"ai_research_retry_days": 0})       # asked again: now found
         self.assertEqual((out3.requests, len(out3.filled)), (1, 3))
+
+    def test_not_published_is_remembered_in_the_sheet(self):
+        """A host forgets ai_research.json on restart: the AI Searched cell in the Universal Sheet keeps the date, so
+        the stock is still not searched again within the retry window; once found, the note is cleared."""
+        from datetime import datetime
+        from crest.ai_research import write_back
+        uni, matched = self._universe()
+        out = self._run(matched, answer=lambda it: {"status": "not_published", "quarter": "Q1 FY27",
+                                                    "sector": "Pharmaceuticals"})
+        self.assertEqual(out.requests, 1)
+        self.assertEqual(write_back([], uni, matched, self.per), 1)
+        body = [c for c in self.fake.calls if c[0] == "post" and "values:batchUpdate" in c[1]][0][2]
+        got = {d["range"].split("!")[1]: d["values"][0][0] for d in body["data"]}
+        col = next(k[:-1] for k, v in got.items() if v == "AI Searched")
+        note = got[f"{col}2"]
+        today = datetime.now().strftime("%d/%m/%Y")
+        self.assertEqual(note, f"Q2FY27 · {today} · Q2 FY27 results not found yet")
+        # the "host restarted": no ai_research.json, but the sheet has the note -> no request, no search
+        (self.td / "ai_research.json").unlink()
+        rows = [list(r) + [None] * (len(self.ROWS[0]) - len(r)) for r in self.ROWS]
+        rows = [rows[0] + ["AI Searched"]] + [r + ([note] if r[0] == "Aaa Ltd" else [None]) for r in rows[1:]]
+        sec = rows[0].index("Sector")
+        for r in rows[1:]:
+            if r[0] == "Aaa Ltd":
+                r[sec] = "Pharmaceuticals"                  # the sector the first run wrote to the sheet
+        uni2, matched2 = self._universe(rows=rows)
+        out2 = self._run(matched2)
+        self.assertEqual((out2.requests, out2.searches), (0, 0))
+        self.assertIn(today, " ".join(w for _, w in out2.skipped))
+        # after the retry window it is searched again; found now, so the note is cleared
+        uni3, matched3 = self._universe(rows=rows)
+        out3 = self._run(matched3, settings={"ai_research_retry_days": 0})
+        self.assertEqual(out3.requests, 1)
+        a = next(m.uni for m in matched3 if m.uni.key == "AAA")
+        self.assertEqual(a.ai_searched_new, "")
 
     def test_sector_only_answer_does_not_hold_back_results(self):
         uni, matched = self._universe()
@@ -800,8 +907,20 @@ class WebAPI(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn("CREST_Holdings_Template.xlsx", r.headers["content-disposition"])
 
+    def test_stages_without_libreoffice(self):
+        import os
+        from crest.api import stages_for
+        self.assertEqual([s["key"] for s in stages_for("both", pdf=True)],
+                         ["sheet", "match", "research", "excel", "check", "ai", "deck", "qa"])
+        hosted = stages_for("both", pdf=False)                  # hosted website: no formula check, no PDF
+        self.assertEqual([s["key"] for s in hosted], ["sheet", "match", "research", "excel", "ai", "deck", "qa"])
+        self.assertEqual(hosted[-1]["label"], "Quality checks")
+        with mock.patch.dict(os.environ, {"CREST_HOSTED": "1"}):
+            self.assertTrue(self.c.get("/api/status").json()["hosted"])
+
     def test_upload_run_and_download(self):
-        r = self._upload(step="portfolio")
+        with mock.patch("crest.api.libreoffice_found", return_value=True):
+            r = self._upload(step="portfolio")
         self.assertEqual(r.status_code, 201)
         j = r.json()
         self.assertEqual([s["key"] for s in j["stages"]], ["sheet", "match", "research", "excel", "check"])
@@ -912,7 +1031,8 @@ class EndToEnd(unittest.TestCase):
 
     def test_excel_formulas(self):
         wb = openpyxl.load_workbook(self.out / "Sample Client Portfolio.xlsx")
-        self.assertEqual(wb.sheetnames, ["Portfolio", "Raw_Holdings", "Holdings_Normalized", "Universal_Snapshot", "Exceptions"])
+        self.assertEqual(wb.sheetnames, ["Portfolio", "Raw_Holdings", "Holdings_Normalized", "Universal_Snapshot",
+                                         "Exceptions", "References"])
         ws = wb["Portfolio"]
         self.assertEqual(ws["B8"].value, "Name")
         values = {2, 4, 6, 7}            # Name, Sector, Quantity, Average Price: plain values
@@ -1078,6 +1198,23 @@ class Steps(unittest.TestCase):
     @staticmethod
     def _ni(res):
         return json.loads((res.run_dir / "outputs" / "narrative_input.json").read_text(encoding="utf-8"))
+
+    def test_hosted_without_libreoffice(self):
+        """Hosted website: no LibreOffice is expected - no warning, numbers from Python, a note about the PDF."""
+        import os
+        with mock.patch.dict(os.environ, {"CREST_HOSTED": "1"}), \
+                mock.patch("crest.step_portfolio.find_soffice", return_value=None), \
+                mock.patch("crest.step_deck.find_soffice", return_value=None):
+            res = run(**ARGS, runs_dir=self.tmp / "hosted", render_png=True)
+        names = {c.name for c in res.checks}
+        self.assertNotIn("No Excel error values after recalculation", names)
+        self.assertNotIn("pdf", res.outputs)
+        self.assertIn("deck", res.outputs)
+        self.assertTrue(any("not recalculated as a cross-check" in n for n in res.notes))
+        self.assertTrue(any("Save as PDF" in n for n in res.notes))
+        both = openpyxl.load_workbook(self.both.outputs["excel"], data_only=False)["Portfolio"]
+        mine = openpyxl.load_workbook(res.outputs["excel"], data_only=False)["Portfolio"]
+        self.assertEqual([c.value for c in mine["A"]], [c.value for c in both["A"]])   # same holdings, same order
 
     def test_portfolio_only(self):
         res = run(**ARGS, step="portfolio", runs_dir=self.tmp / "a", render_png=False)

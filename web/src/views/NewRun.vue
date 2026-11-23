@@ -10,11 +10,15 @@ import { api, type Step, type SystemStatus } from '@/api'
 const props = defineProps<{ status?: SystemStatus | null }>()
 const router = useRouter()
 
-const steps: { key: Step; title: string; from: string; to: string; icon: any }[] = [
-  { key: 'portfolio', title: 'Portfolio Excel', from: 'Holdings template', to: 'Portfolio Excel', icon: FileSpreadsheet },
-  { key: 'deck', title: 'Review deck', from: 'Portfolio Excel or template', to: 'PowerPoint and PDF', icon: Presentation },
-  { key: 'both', title: 'Excel and deck', from: 'Holdings template', to: 'Excel, PowerPoint and PDF', icon: Layers },
-]
+// without LibreOffice (the hosted website) the deck comes as PowerPoint only; staff save it as PDF themselves
+const steps = computed<{ key: Step; title: string; from: string; to: string; icon: any }[]>(() => {
+  const pdf = props.status?.libreoffice !== false
+  return [
+    { key: 'portfolio', title: 'Portfolio Excel', from: 'Holdings template', to: 'Portfolio Excel', icon: FileSpreadsheet },
+    { key: 'deck', title: 'Review deck', from: 'Portfolio Excel or template', to: pdf ? 'PowerPoint and PDF' : 'PowerPoint', icon: Presentation },
+    { key: 'both', title: 'Excel and deck', from: 'Holdings template', to: pdf ? 'Excel, PowerPoint and PDF' : 'Excel and PowerPoint', icon: Layers },
+  ]
+})
 const step = ref<Step>('both')
 const file = ref<File | null>(null)
 const error = ref('')
@@ -32,7 +36,7 @@ const warnings = computed(() => {
   if (!s.ai) w.push('No narrative API key: ratings and the narrative will not be written by the AI.')
   else if (!s.web_search) w.push('No web search key: only blank sectors are filled; results stay “Results awaited”.')
   if (step.value !== 'portfolio' && !s.deck_template) w.push('The deck template is missing (templates/Deck_-_template.pptx).')
-  if (!s.libreoffice) w.push('LibreOffice is not installed: no PDF and no formula check.')
+  if (!s.libreoffice && !s.hosted) w.push('LibreOffice is not installed: no PDF and no formula check.')
   return w
 })
 

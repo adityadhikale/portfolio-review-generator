@@ -34,13 +34,12 @@ from fastapi.staticfiles import StaticFiles
 
 from .narrative_api import resolve_ai
 from .office import find_soffice
-from .util import ROOT, PipelineError, load_env, load_json, CONFIG_DIR
+from .util import ROOT, PipelineError, deck_template_path, hosted, load_env, load_json, CONFIG_DIR
 
 RUNS_DIR = ROOT / "runs"
 JOBS_DIR = RUNS_DIR / "_web"
 OUTPUT_DIR = ROOT / "output"
 HOLDINGS_TEMPLATE = ROOT / "templates" / "Holdings_Template.xlsx"
-DECK_TEMPLATE = ROOT / "templates" / "Deck_-_template.pptx"
 WEB_DIST = ROOT / "web" / "dist"
 MAX_UPLOAD = 20 * 1024 * 1024
 
@@ -51,6 +50,16 @@ STEP_STAGES = {"portfolio": ["sheet", "match", "research", "excel", "check"],
                "deck": ["sheet", "match", "research", "ai", "deck", "qa"],
                "both": ["sheet", "match", "research", "excel", "check", "ai", "deck", "qa"]}
 STEP_LABELS = {"portfolio": "Portfolio Excel", "deck": "Deck", "both": "Excel and deck"}
+
+
+def stages_for(step: str, pdf: bool) -> list[dict]:
+    """The stages a run shows. Without LibreOffice (the hosted website) there is no formula check and no PDF."""
+    keys = [k for k in STEP_STAGES[step] if pdf or k != "check"]
+    return [{"key": k, "label": "Quality checks" if k == "qa" and not pdf else STAGES[k]} for k in keys]
+
+
+def libreoffice_found() -> bool:
+    return bool(find_soffice(load_json(CONFIG_DIR / "settings.json").get("libreoffice_path", "")))
 
 
 def _now() -> str:
@@ -109,7 +118,7 @@ class Jobs:
         d.mkdir(parents=True, exist_ok=True)
         (d / filename).write_bytes(data)
         j = {"id": jid, "step": step, "step_label": STEP_LABELS[step], "filename": filename, "status": "queued",
-             "stages": [{"key": k, "label": STAGES[k]} for k in STEP_STAGES[step]], "stage": None,
+             "stages": stages_for(step, libreoffice_found()), "stage": None,
              "created": _now(), "started": None, "finished": None, "client": None, "period": None,
              "result": None, "error": None, "version": 0}
         with self.changed:
@@ -183,7 +192,7 @@ def run_pipeline(job: dict, folder: Path, progress) -> dict:
     progress("sheet")
     us = open_universal(load_env(), runs_dir=RUNS_DIR)
     period = detect_period(us)
-    res = run(period=period, universal=us, holdings=folder / job["filename"], template=DECK_TEMPLATE,
+    res = run(period=period, universal=us, holdings=folder / job["filename"], template=deck_template_path(),
               runs_dir=RUNS_DIR, publish_dir=OUTPUT_DIR, step=job["step"], progress=progress)
     return summarise(res, folder)
 
@@ -240,8 +249,8 @@ def create_app(runner=run_pipeline, jobs_dir: Path = JOBS_DIR, serve_web: bool =
         return {"universal": "Google Sheet" if sid else "Local file (templates/universal-sheet.xlsx)",
                 "google": bool(sid), "ai": resolve_ai(env), "web_search": bool(env.get("TAVILY_API_KEY")),
                 "ai_research": settings.get("ai_research", "auto"),
-                "libreoffice": bool(find_soffice(settings.get("libreoffice_path", ""))),
-                "deck_template": DECK_TEMPLATE.exists(), "queue": jobs.queued()}
+                "libreoffice": libreoffice_found(), "hosted": hosted(),
+                "deck_template": deck_template_path().exists(), "queue": jobs.queued()}
 
     @app.get("/api/template")
     def template():

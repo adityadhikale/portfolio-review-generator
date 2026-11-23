@@ -88,7 +88,8 @@ The layout stays as it is today:
 
 - Portfolio sheet: summary at the top, headers on row 8, holdings from row 9, hidden Key column A.
 - Market Cap and CMP are GOOGLEFINANCE formulas that go live in Google Sheets; Ticker and Views use INDEX/MATCH.
-- Other sheets: Raw_Holdings, Holdings_Normalized, Universal_Snapshot, Exceptions.
+- Other sheets: Raw_Holdings, Holdings_Normalized, Universal_Snapshot, Exceptions, and References (added
+  23/11/2026: AI-written values with their source links, and AI ratings with their reasons).
 
 Two additions so Step B can read it back reliably:
 
@@ -103,6 +104,8 @@ The same columns as today, plus:
 - **Data Source** and **Data Updated**, written by the tool when AI fills Sector, Result Line or Commentary. They
   record the model, period, date and source links, in the same way Rating Source and Rating Reason do today.
 - Cells CREST types have a blank Data Source and are never overwritten.
+- **AI Searched** (added 23/11/2026): "quarter · date · why" when a stock's results were searched but are not out
+  yet, so the stock is not searched again for a few days.
 
 ## 6. Phases
 
@@ -211,11 +214,85 @@ separate Vue front end talks to that API.
   `http://localhost:8000`. For front-end work, `npm run dev` gives live reload against the same API.
 - Node.js is needed only to build the front end; the built files are plain HTML, CSS and JavaScript.
 
-### Phase 6: Later (not in this build)
+### Phase 6: Free hosting
 
-- Google sign-in limited to `@crest-group.co` accounts.
-- A container image with LibreOffice and the built front end, deployed to Google Cloud Run.
-- The run archive kept in Google Cloud Storage instead of on the server's disk.
+Planned 23/11/2026. Goal: the website online for CREST staff, on a host that **never asks for a card**.
+Progress: steps 1, 2 and 6 built 23/11/2026; step 0 (Render sign-up), step 5 and step 7 to do.
+
+**Decisions (23/11/2026)**
+
+| Topic | Decision |
+|---|---|
+| Host | **Render, Free web service** (one instance, 512 MB memory, 0.1 CPU, 750 free hours a month). Region: Singapore |
+| Not used | Google Cloud Run, Oracle, Fly.io, Koyeb (ask for a card); Vercel (free plan is non-commercial only, and requests are time-limited); Netlify (no Python); a VM |
+| LibreOffice | **Not on the host.** The hosted site delivers the Portfolio Excel and the PPT; staff make the PDF in PowerPoint (File, Save as PDF). The two checks LibreOffice gave are dropped on the host and accepted: the Excel-vs-Python cross-check, and the PNG render that finds text running off a slide. All numbers already come from Python when LibreOffice is missing |
+| Local use | Unchanged. `python run.py` and `python serve.py` on a PC with LibreOffice still make the PDF and run both checks |
+| Sign-in | **Not now** (decided 23/11/2026). Anyone with the site's link can use it, so the link is shared only inside CREST. "Sign in with Google" limited to `@crest-group.co` can be added later |
+| Storage | Nothing that matters is kept on the host's disk (Render wipes it on every restart and after 15 idle minutes). Result files are downloaded straight after the run |
+| AI caches | **Not moved** (decided 23/11/2026). On the host, `ai_research.json` and `ai_ratings.json` last until the server restarts or sleeps. Answers written into the Universal Sheet (Data Source, Rating Source) are still reused, so little is asked twice. Added 23/11/2026 so nothing depends on those files: an **AI Searched** column remembers "results not out yet, searched on date X", and sheet writes retry brief Google errors and follow rows that moved |
+| Client data | Uploaded holdings pass through Render while a run works and are wiped when the server sleeps. **CREST to agree this before go-live** |
+
+**What Render's free plan means in practice**
+
+- The site sleeps after 15 minutes with no visitors; the first visit after that shows a loading page for about a
+  minute.
+- Render may restart the server at any time. A run in progress when that happens fails and is run again.
+- Run history covers only the runs since the server last woke. Staff download the Excel and PPT when the run
+  finishes; the page says so.
+- 0.1 CPU is slow. A full run is timed during the trial (step 7); if it is too slow, Hugging Face Spaces (also
+  free, no card, more CPU and memory) is the fallback, with the same code.
+
+**Step 0: confirm before building**
+
+Render's docs (read 23/11/2026) do not say whether sign-up needs a card, whether the free plan allows Docker, or
+the free bandwidth and build-minute figures. Sign up for Render with a CREST account first and confirm: no card
+asked, a free web service can be created, and the Singapore region is offered. If a card is asked for, stop and
+use Hugging Face Spaces instead.
+
+**Step 1: hosted mode without LibreOffice**
+
+- A setting (environment variable `CREST_HOSTED=1`) for the hosted site.
+- On the host, "LibreOffice not found" is not a warning: the report and website say "PDF: make it in
+  PowerPoint" instead.
+- The website shows "PowerPoint" instead of "PowerPoint and PDF", and leaves out the "Checking the Excel
+  formulas" stage when hosted. `pymupdf` is already loaded only when a PDF is rendered.
+
+**Step 2: settings from environment variables**
+
+- The host has no `.env`, so `load_env()` also reads every setting it knows (sheet, keys, hosted mode) straight
+  from the environment; the host sets them in Render's dashboard.
+- New: the Google service-account key can be given as the **contents** of the key file
+  (`GOOGLE_CREDENTIALS_JSON`), not only a path, so no key file is needed on the host.
+- The deck template (`Deck_-_template.pptx`, not in git) is uploaded to the host as a private file, and its
+  path is given in `CREST_DECK_TEMPLATE`.
+- Lost on the host, and accepted: a saved `narrative.json` for a client (a re-run asks the narrative API again,
+  one request) and the "use the latest snapshot if Google is down" fallback (the run stops with a clear message
+  instead).
+
+Steps 3 (AI caches in the Universal Sheet) and 4 (Google sign-in) were dropped on 23/11/2026; see Decisions.
+
+**Step 5: deployment files**
+
+- `render.yaml` (or Dockerfile, per step 0): install Python requirements, build the front end
+  (`npm ci`, `npm run build`), start with `uvicorn` on Render's port.
+- `serve.py` reads the port and host from the environment.
+
+**Step 6: tests**
+
+- Hosted mode: no LibreOffice warning, no PDF in the results, the stage list without the two LibreOffice stages.
+- `GOOGLE_CREDENTIALS_JSON` read in place of a file; settings read from the environment with no `.env`.
+- All existing tests still pass.
+
+**Step 7: trial on Render**
+
+- Deploy and run a sample client: Portfolio, Deck and Both.
+- Time a full run and watch memory in Render's dashboard.
+- Confirm the PPT opens in PowerPoint and saves as PDF with the right fonts.
+
+**Before go-live (CREST)**
+
+- Agree that client holdings may pass through Render.
+- Fix the narrative-API key (the free-tier 403), or the hosted site runs without AI research and narrative.
 
 ## 7. What is kept and what is removed
 
@@ -253,4 +330,5 @@ Universal Sheet as the source of truth (it stays only as an offline fallback and
 |---|---|
 | Phase 3 | The service-account key saved as a file (never pasted in a chat); the Universal Sheet uploaded to Google Sheets and shared with the service account's email; the sheet ID |
 | Phase 4 | The paid narrative-API key, added to `.env` |
+| Phase 6 | A Render account (no card); agreement that client holdings may pass through Render |
 | End of every phase | Run the commit and push commands provided |

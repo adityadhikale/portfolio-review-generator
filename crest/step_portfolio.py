@@ -6,6 +6,7 @@ from . import validate as V
 from .excel_build import build_workbook
 from .office import find_soffice, recalculate_copy
 from .shared import Ctx, _py_as_excel, gate
+from .util import hosted
 
 
 def build_portfolio(ctx: Ctx) -> dict:
@@ -40,6 +41,10 @@ def build_portfolio(ctx: Ctx) -> dict:
         res.checks.append(V.python_vs_excel(dd.compare(excel_vals, py)))
         res.info["excel_cached_values"] = ("no - Excel / Google Sheets calculate on open; Market Cap and CMP are "
                                            "GOOGLEFINANCE formulas (live in Google Sheets, this run's values elsewhere)")
+    elif hosted():
+        res.notes.append("Hosted website: no LibreOffice here, so the Excel was not recalculated as a cross-check; "
+                         "every number was computed in Python from the same inputs. Excel calculates on open.")
+        excel_vals = _py_as_excel(py, matched, priced, deck_group_of)
     else:
         res.checks.append(V.Check("No Excel error values after recalculation", "WARN",
                                   "LibreOffice not found - workbook not recalculated; values computed in Python "

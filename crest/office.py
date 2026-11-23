@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .util import PipelineError
+from .util import PipelineError, hosted
 
 _CANDIDATES = [
     r"C:\Program Files\LibreOffice\program\soffice.exe",
@@ -28,6 +28,8 @@ End Sub
 
 
 def find_soffice(configured: str = "") -> str | None:
+    if hosted():          # the hosted website has no LibreOffice by design (PPT only), even if one is found
+        return None
     for c in [configured, shutil.which("soffice"), shutil.which("soffice.exe"), *_CANDIDATES]:
         if c and Path(c).exists():
             return str(c)

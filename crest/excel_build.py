@@ -6,6 +6,8 @@ Sheets
   Holdings_Normalized  the holdings the pipeline used (duplicate rows merged)
   Universal_Snapshot   the Universal Sheet rows matched to this client (no other stocks)
   Exceptions           everything that needs a human look
+  References           AI-written Sector / Result Line / Commentary with source links, and AI Rating / Sentiment
+                       with the AI's reason
 """
 from __future__ import annotations
 
@@ -253,6 +255,62 @@ def build_workbook(path: Path, *, client: str, asof: str, period_label: str, par
     exc.freeze_panes = "A2"
     _font_all(exc)
 
+    _references(wb.create_sheet("References"), snapshot_rows)
+
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     return ExcelLayout(path, first, last, total, keys)
+
+
+def _references(ref, matched):
+    """References: every value the AI wrote for this client's stocks, with its sources (the same list the website
+    shows under 'AI values to review'), then every AI Rating / Sentiment with the AI's reason."""
+    from .ai_research import ai_rated, ai_sourced
+    research, ratings = ai_sourced(matched), ai_rated(matched)
+    bold = Font(name=FONT, bold=True, size=12)
+    grey = Font(name=FONT, color="595959")
+    link = Font(name=FONT, color="0563C1", underline="single")
+    ref["A1"] = "AI-sourced values and their references"
+    ref["A1"].font = bold
+    ref["A2"] = ("Written by the AI, not typed by CREST. Check each against its source before the deck goes out. To "
+                 "correct one, type over it in the Universal Sheet and clear that row's Data Source (or Rating Source).")
+    ref["A2"].font = grey
+
+    r = 4
+    ref.cell(r, 1, "Sector, Result Line and Management Commentary").font = Font(name=FONT, bold=True)
+    r += 1
+    _hdr(ref, r, ["Symbol", "Company", "Field", "Value", "Quarter", "New this run", "Source 1", "Source 2", "Source 3"])
+    if not research:
+        r += 1
+        ref.cell(r, 1, "None: no AI-written Sector, Result Line or Commentary in this portfolio.").font = grey
+    for x in research:
+        r += 1
+        urls = [u.strip() for u in str(x["sources"]).split("|") if u.strip().lower().startswith(("http://", "https://"))]
+        for j, v in enumerate([x["symbol"], x["name"], x["field"], x["value"], x["period"],
+                               "Yes" if x["new"] else "No"], start=1):
+            ref.cell(r, j, v).alignment = Alignment(vertical="top", wrap_text=j == 4)
+        if not urls:
+            ref.cell(r, 7, "none recorded").font = grey
+        for j, u in enumerate(urls[:3], start=7):
+            c = ref.cell(r, j, u)
+            c.hyperlink, c.font = u, link
+            c.alignment = Alignment(vertical="top")
+
+    r += 3
+    ref.cell(r, 1, "Rating and Sentiment").font = Font(name=FONT, bold=True)
+    ref.cell(r, 4, "Judged by the AI from the stock's Result Line and Management Commentary (above, or in "
+                   "Universal_Snapshot); no web sources.").font = grey
+    r += 1
+    _hdr(ref, r, ["Symbol", "Company", "Rating · Sentiment", "Reason"])
+    if not ratings:
+        r += 1
+        ref.cell(r, 1, "None: no AI-given Rating or Sentiment in this portfolio.").font = grey
+    for x in ratings:
+        r += 1
+        rs = " · ".join(v for v in (x["rating"], x["sentiment"]) if v)
+        for j, v in enumerate([x["symbol"], x["name"], rs, x["reason"] or "none recorded"], start=1):
+            ref.cell(r, j, v).alignment = Alignment(vertical="top", wrap_text=j == 4)
+
+    for j, w in enumerate([13, 30, 22, 60, 10, 12, 40, 40, 40], start=1):
+        ref.column_dimensions[get_column_letter(j)].width = w
+    _font_all(ref)

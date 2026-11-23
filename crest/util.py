@@ -35,13 +35,30 @@ def load_env(path: Path | None = None) -> dict:
             if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
                 v = v[1:-1]
             out[k.strip()] = v
-    for k in list(out):
+    for k in set(out) | set(ENV_KEYS):     # a host with no .env sets these in its dashboard
         if os.environ.get(k):
             out[k] = os.environ[k]
-    for k in ("NARRATIVE_PROVIDER", "NARRATIVE_API_KEY", "NARRATIVE_MODEL"):
-        if k not in out and os.environ.get(k):
-            out[k] = os.environ[k]
     return out
+
+
+# Settings the tool reads from .env or the environment (see .env.example).
+ENV_KEYS = ("NARRATIVE_PROVIDER", "NARRATIVE_API_KEY", "NARRATIVE_MODEL", "UNIVERSAL_SHEET_ID", "UNIVERSAL_WORKSHEET",
+            "GOOGLE_CREDENTIALS_FILE", "GOOGLE_CREDENTIALS_JSON", "TAVILY_API_KEY", "CREST_HOSTED",
+            "CREST_DECK_TEMPLATE")
+
+
+def hosted() -> bool:
+    """True on the hosted website (CREST_HOSTED=1): no LibreOffice there, so no PDF and no LibreOffice checks, and
+    that is expected rather than a warning."""
+    return str(load_env().get("CREST_HOSTED") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def deck_template_path() -> Path:
+    """The deck template: CREST_DECK_TEMPLATE when set (the host keeps it outside the code), else templates\\."""
+    p = str(load_env().get("CREST_DECK_TEMPLATE") or "").strip()
+    if not p:
+        return ROOT / "templates" / "Deck_-_template.pptx"
+    return Path(p) if Path(p).is_absolute() else ROOT / p
 
 
 # --------------------------------------------------------------------------- symbols / names

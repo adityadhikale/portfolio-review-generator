@@ -259,7 +259,7 @@ def _research(res, settings, per, env, uni, matched, step):
                          "separate ratings request needed for them)")
     res.info["ai_research"] = {"requests": out.requests, "searches": out.searches, "filled": len(out.filled),
                                "skipped": out.skipped}
-    if out.filled:
+    if out.filled or any(getattr(m.uni, "ai_searched_new", None) is not None for m in matched):
         ai_research.write_back(res.notes, uni, matched, per)
     res.info["ai_sourced"] = ai_research.ai_sourced(matched)
     if res.info["ai_sourced"]:
@@ -318,6 +318,8 @@ def _set_ai_rating(u, g):
     if not u.sentiment:
         u.sentiment = g["sentiment"]
     u.rating_source = "Universal Sheet" if typed else "AI (Gemini)"
+    if not typed:
+        u.ai_rating_reason = g.get("reason") or ""
 
 
 def _use_sheet_ai_ratings(res, matched):

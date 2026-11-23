@@ -93,6 +93,7 @@ export interface SystemStatus {
   web_search: boolean
   ai_research: string
   libreoffice: boolean
+  hosted: boolean
   deck_template: boolean
   queue: number
 }

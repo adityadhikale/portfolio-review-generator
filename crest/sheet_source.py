@@ -5,7 +5,7 @@ crest/universal.py are identical for either source.
 
     GoogleSheet  reads the whole worksheet in one request and writes AI results back in one request, through a
                  Google Cloud service account (.env: UNIVERSAL_SHEET_ID, UNIVERSAL_WORKSHEET,
-                 GOOGLE_CREDENTIALS_FILE). GOOGLEFINANCE cells still showing "Loading..." are read once more after
+                 GOOGLE_CREDENTIALS_FILE, or the key's contents in GOOGLE_CREDENTIALS_JSON). GOOGLEFINANCE cells still showing "Loading..." are read once more after
                  a short wait.
     LocalSheet   reads templates/universal-sheet.xlsx (values saved in the file). It is never written.
 
@@ -75,8 +75,11 @@ class GoogleSheet:
     live = True
 
     def __init__(self, sheet_id: str, worksheet: str = DEFAULT_WORKSHEET, credentials_file=None, *,
-                 session=None, sleep=time.sleep, loading_wait: float = 15.0, timeout: float = 60.0):
+                 credentials_json: str | None = None, session=None, sleep=time.sleep, loading_wait: float = 15.0,
+                 timeout: float = 60.0):
         self.sheet_id = sheet_id.strip()
+        # the key file's contents (GOOGLE_CREDENTIALS_JSON) win over a path: a host keeps no key file on disk
+        self.credentials_json = (credentials_json or "").strip() or None
         self.worksheet = worksheet or DEFAULT_WORKSHEET
         self.credentials_file = Path(credentials_file or ROOT / DEFAULT_CREDENTIALS)
         if not self.credentials_file.is_absolute():
@@ -91,7 +94,7 @@ class GoogleSheet:
     # ---- HTTP
     def session(self):
         if self._session is None:
-            if not self.credentials_file.exists():
+            if not self.credentials_json and not self.credentials_file.exists():
                 raise PipelineError(
                     f"Google credentials file not found: {self.credentials_file}. Save the service-account key "
                     "there (see README: 'Google Sheets setup'), or set GOOGLE_CREDENTIALS_FILE in .env.")
@@ -104,13 +107,22 @@ class GoogleSheet:
                     f"A package needed to read the Google Sheet is missing for the Python running this tool "
                     f"({sys.executable}): {e}. Install the packages into that Python with this command, then run "
                     f"again:   {Path(sys.executable).name} -m pip install -r requirements.txt") from e
-            try:
-                creds = Credentials.from_service_account_file(str(self.credentials_file), scopes=SCOPES)
-            except (ValueError, KeyError) as e:
-                raise PipelineError(f"{self.credentials_file.name} is not a service-account key file ({e}).") from e
+            creds = self._credentials(Credentials)
             self.service_email = getattr(creds, "service_account_email", "")
             self._session = AuthorizedSession(creds)
         return self._session
+
+    def _credentials(self, Credentials):
+        if self.credentials_json:
+            try:
+                return Credentials.from_service_account_info(json.loads(self.credentials_json), scopes=SCOPES)
+            except (ValueError, KeyError) as e:
+                raise PipelineError(f"GOOGLE_CREDENTIALS_JSON is not a service-account key ({e}). Paste the whole "
+                                    "contents of the key file.") from e
+        try:
+            return Credentials.from_service_account_file(str(self.credentials_file), scopes=SCOPES)
+        except (ValueError, KeyError) as e:
+            raise PipelineError(f"{self.credentials_file.name} is not a service-account key file ({e}).") from e
 
     def _call(self, method: str, url: str, **kw):
         try:
@@ -156,11 +168,26 @@ class GoogleSheet:
         return self.worksheet, rows
 
     # ---- write
+    WRITE_TRIES = 3          # a brief Google outage is retried, so the answers are not left only in local files
+    RETRY_WAIT = 5.0
+
     def write(self, updates: dict, expect: dict | None = None) -> list[int]:
         """updates: {row number: {column letter: value}}, written in one request (values as typed, RAW).
-        expect: {row number: (column letter, value)} - before writing, these cells are read again and a row whose
-        cell no longer holds that value (rows inserted or sorted in the sheet since it was read) is skipped.
+        expect: {row number: (column letter, value)} - before writing, these cells are read again. A row whose cell
+        no longer holds that value (rows inserted or sorted in the sheet since it was read) is found again by that
+        value and written at its new row; it is skipped only when the value is gone or appears more than once.
         Returns the row numbers written."""
+        for attempt in range(1, self.WRITE_TRIES + 1):
+            try:
+                return self._write(dict(updates), expect)
+            except SheetUnreachable as e:
+                if attempt == self.WRITE_TRIES:
+                    raise
+                self.notes.append(f"Writing to the Universal Sheet failed ({e}); tried again")
+                self.sleep(self.RETRY_WAIT * attempt)
+        return []
+
+    def _write(self, updates: dict, expect: dict | None) -> list[int]:
         if not updates:
             return []
         if expect:
@@ -172,13 +199,10 @@ class GoogleSheet:
             for r, v in zip(rows, vr):
                 cur = (v.get("values") or [[None]])[0]
                 cur = cur[0] if cur else None
-                if _same(cur, expect[r][1]):
-                    continue
-                moved.append(r)
-                updates.pop(r, None)
+                if not _same(cur, expect[r][1]):
+                    moved.append(r)
             if moved:
-                self.notes.append(f"WARN: rows {moved} of the Universal Sheet changed since it was read (rows inserted "
-                                  "or sorted?), so they were not written; the next run writes them")
+                updates = self._follow_moved(updates, expect, moved)
             if not updates:
                 return []
         self._ensure_columns(max(column_index_from_string(c) for u in updates.values() for c in u))
@@ -186,6 +210,32 @@ class GoogleSheet:
         self._call("post", f"{API}/{self.sheet_id}/values:batchUpdate",
                    json={"valueInputOption": "RAW", "data": data})
         return sorted(updates)
+
+    def _follow_moved(self, updates: dict, expect: dict, moved: list) -> dict:
+        """Rows moved since the read: find each by its expected value (the company name) in that column now."""
+        cols = {expect[r][0] for r in moved}
+        now: dict[str, list] = {}
+        for c in cols:
+            got = self._call("get", f"{API}/{self.sheet_id}/values/{quote(self._a1(f'{c}:{c}'), safe='')}"
+                                    "?valueRenderOption=UNFORMATTED_VALUE&majorDimension=COLUMNS")
+            now[c] = ((got.get("values") or [[]])[0])
+        out = {r: u for r, u in updates.items() if r not in moved}
+        lost = []
+        for r in moved:
+            c, want = expect[r]
+            hits = [i + 1 for i, v in enumerate(now[c]) if _same(v, want)]
+            if len(hits) == 1 and hits[0] not in out:
+                out[hits[0]] = updates[r]
+            else:
+                lost.append(r)
+        found = len(moved) - len(lost)
+        if found:
+            self.notes.append(f"{found} row(s) of the Universal Sheet had moved since it was read (rows inserted or "
+                              "sorted); they were found by company name and written at their new place")
+        if lost:
+            self.notes.append(f"WARN: rows {lost} of the Universal Sheet changed since it was read and the company "
+                              "could not be found again by name, so they were not written; the next run writes them")
+        return out
 
     def _ensure_columns(self, need: int):
         """A new column (e.g. Rating Source the first time) may lie beyond the sheet's grid: widen it first."""
@@ -297,7 +347,8 @@ def open_universal(env: dict, local_path=None, runs_dir=None, **google_kw) -> Un
     sid = (env.get("UNIVERSAL_SHEET_ID") or "").strip()
     if local_path is None and sid:
         src = GoogleSheet(sid, env.get("UNIVERSAL_WORKSHEET") or DEFAULT_WORKSHEET,
-                          env.get("GOOGLE_CREDENTIALS_FILE") or None, **google_kw)
+                          env.get("GOOGLE_CREDENTIALS_FILE") or None,
+                          credentials_json=env.get("GOOGLE_CREDENTIALS_JSON"), **google_kw)
     else:
         src = LocalSheet(local_path or ROOT / "templates" / "universal-sheet.xlsx")
     return UniversalSheet(src, runs_dir)

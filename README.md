@@ -109,7 +109,23 @@ python serve.py
 ```
 
 Open **http://localhost:8000**. `python serve.py --host 0.0.0.0` makes it reachable from other machines on the
-office network (there is no login yet; that is Phase 6).
+office network. There is no login: anyone who can open the address can run it.
+
+### Hosting
+
+The website can run on a free host with no LibreOffice (plan: `docs\Architecture_Plan.md`, Phase 6). The host
+has no `.env`; set these in its dashboard:
+
+| Setting | Value |
+|---|---|
+| `CREST_HOSTED` | `1`: the deck comes as PowerPoint only (staff use File > Save as PDF), and the missing LibreOffice is expected, not a warning. Every number is computed in Python; the Excel cross-check and the "text stays on the page" render check are skipped |
+| `UNIVERSAL_SHEET_ID`, `UNIVERSAL_WORKSHEET`, `NARRATIVE_*`, `TAVILY_API_KEY` | As in `.env` |
+| `GOOGLE_CREDENTIALS_JSON` | The whole contents of the service-account key file (no key file on the host) |
+| `CREST_DECK_TEMPLATE` | Path to the deck template uploaded to the host |
+| `PORT` | Set by the host; `serve.py` listens on it, on every address when `CREST_HOSTED=1` |
+
+The host forgets its disk on restart, so run history, `ai_research.json` and `ai_ratings.json` last only until
+then; download results when a run finishes. Values the AI wrote into the Universal Sheet are still reused.
 
 | Part | What it is |
 |---|---|
@@ -198,7 +214,10 @@ tools/                     developer helpers (holdings template, test fixtures, 
 3. **Tickers** are written as `NSE:SYMBOL` / `BSE:CODE`. `BOM:` is rewritten as `BSE:`, and a ticker with no exchange
    defaults to NSE and is flagged.
 4. **Build the Excel** (Step A): sheets `Portfolio`, `Raw_Holdings` (the template as uploaded, unchanged), `Holdings_Normalized`,
-   `Universal_Snapshot` (this client's stocks only) and `Exceptions`. The Portfolio columns are:
+   `Universal_Snapshot` (this client's stocks only), `Exceptions` and `References`. `References` lists every
+   Sector, Result Line and Management Commentary the AI wrote for this client's stocks, with clickable source links
+   (the same list as the website's "AI values to review"), then every Rating and Sentiment the AI gave, with its
+   one-line reason. The Portfolio columns are:
 
    | Column | Content |
    |---|---|
@@ -252,6 +271,7 @@ Blank layout with a column guide: `templates/Universal_Sheet_template.xlsx` (Leg
 | Short Name, Deck Group, Exchange, Instrument Type | optional | display name, group override, ETF flag (`Sector = ETF` also works) |
 | Data Source, Data Updated | written by the tool | added when the AI fills a blank Sector / Result Line / Commentary: model, quarter, which fields, source links; leave blank for values you type. The sheet's own Source / Last Updated columns are never written |
 | Rating Source, Rating Reason | written by the tool | added when the narrative API fills a blank Rating / Sentiment (source, period and a change code); leave blank for ratings you type |
+| AI Searched | written by the tool | `quarter · date · why` when a stock's results were searched but are not out yet (or not usable). The stock is not searched again for `ai_research_retry_days`; cleared once the results are found. Clear it to have the stock searched on the next run |
 
 **Where it is read from.** The Universal Sheet lives in Google Sheets, where GOOGLEFINANCE keeps price and market cap
 live. Each batch of runs reads the whole tab in one request, so every client in the batch, and both steps of a run,
@@ -265,9 +285,11 @@ shared, wrong ID or tab name), the run stops with the reason.
 
 **Writing back.** Ratings from the narrative API are written to the Google Sheet in one request: Rating, Sentiment,
 Rating Source and Rating Reason, only for stocks whose Rating and Sentiment were blank. Just before writing, the
-tool checks each target row still holds the same company (in case rows were inserted or sorted meanwhile) and skips
-any row that moved. Nothing is written when the run used a snapshot or the local file; the ratings stay in
-`runs\<period>\ai_ratings.json` and are written on the next run that reads the Google Sheet.
+tool checks each target row still holds the same company. A row that moved (rows inserted or sorted meanwhile) is
+found again by company name and written at its new place; it is skipped only when the name is gone or appears twice.
+A brief Google error while writing is retried twice. Nothing is written when the run used a snapshot or the local
+file; the ratings stay in `runs\<period>\ai_ratings.json` and are written on the next run that reads the Google
+Sheet. AI research answers are written the same way.
 
 **Local file.** With no `UNIVERSAL_SHEET_ID` in `.env`, or with `--universal <file.xlsx>`, the tool reads
 `templates\universal-sheet.xlsx` (values saved in the file) and never writes to it.
@@ -342,7 +364,8 @@ request. Stocks over the limit are researched on the next run.
 **Saved answers.** `runs\<period>\ai_research.json` keeps every answer: a stock's result for a quarter is never
 asked for twice, and "not published yet" is asked again after `ai_research_retry_days` (3). New values are
 written to the Google Sheet with **Data Source** (`AI · model · quarter · fields · source links`) and **Data
-Updated**.
+Updated**; "not published yet" is also written there, in **AI Searched**, so the wait holds even where
+`ai_research.json` is lost (the hosted website forgets its disk on restart).
 
 **Review.** `report.md` lists every AI-written value among the client's holdings under **"AI-sourced: review
 before sending"**, with its sources, and what could not be filled and why. To correct a value, type over it in

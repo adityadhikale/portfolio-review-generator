@@ -16,8 +16,11 @@ const chips = computed(() => {
       tip: s.ai ? 'Ratings and narrative by the narrative API' : 'No narrative API key in .env: no AI ratings or narrative' },
     { icon: Search, ok: s.web_search, label: s.web_search ? 'Web search' : 'No search',
       tip: s.web_search ? 'Result lines and commentary researched with Tavily' : 'No Tavily key: only blank sectors are filled' },
-    { icon: Globe, ok: s.libreoffice, label: s.libreoffice ? 'PDF ready' : 'No PDF',
-      tip: s.libreoffice ? 'LibreOffice found: formula checks and PDF' : 'LibreOffice not found: no PDF or formula check' },
+    s.hosted && !s.libreoffice
+      ? { icon: Globe, ok: true, label: 'PPT only',
+          tip: 'Hosted website: the deck comes as PowerPoint. Open it and use File > Save as PDF.' }
+      : { icon: Globe, ok: s.libreoffice, label: s.libreoffice ? 'PDF ready' : 'No PDF',
+          tip: s.libreoffice ? 'LibreOffice found: formula checks and PDF' : 'LibreOffice not found: no PDF or formula check' },
   ]
 })
 </script>

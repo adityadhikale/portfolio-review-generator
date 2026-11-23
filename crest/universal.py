@@ -47,6 +47,9 @@ SCHEMA = {
     # (The sheet's own 'Source' / 'Last Updated' columns belong to CREST's data process and are never written.)
     "data_source": ("Data Source", ["Data Source"], False),
     "data_updated": ("Data Updated", ["Data Updated"], False),
+    # Written by the tool when a stock's results were searched but not usable yet: "period · dd/mm/yyyy · why". The
+    # stock is not searched again for ai_research_retry_days, even on a host that forgets ai_research.json.
+    "ai_searched": ("AI Searched", ["AI Searched"], False),
 }
 QUARTERLY = ("result", "rating", "sentiment", "commentary")
 RATINGS = ["Excellent", "Good", "Average", "Weak"]

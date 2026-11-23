@@ -21,12 +21,12 @@ from pathlib import Path
 
 from crest.pipeline import run
 from crest.sheet_source import open_universal
-from crest.util import ROOT, PipelineError, load_env
+from crest.util import ROOT, PipelineError, deck_template_path, load_env
 
 INPUT_DIR = ROOT / "input"
 OUTPUT_DIR = ROOT / "output"
 DEFAULT_UNIVERSAL = ROOT / "templates" / "universal-sheet.xlsx"
-DEFAULT_TEMPLATE = ROOT / "templates" / "Deck_-_template.pptx"
+DEFAULT_TEMPLATE = deck_template_path()
 
 
 def input_files() -> list[Path]:

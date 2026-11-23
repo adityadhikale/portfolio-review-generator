@@ -9,11 +9,13 @@ The front end must be built once (and after every change to web/):  cd web  then
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 import uvicorn
 
 from crest.api import WEB_DIST, create_app
+from crest.util import hosted
 
 
 def main(argv=None) -> int:
@@ -21,8 +23,9 @@ def main(argv=None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
     ap = argparse.ArgumentParser(description="CREST Portfolio Review website")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8000)
+    # a host sets PORT (and HOST, or CREST_HOSTED=1 to listen on every address)
+    ap.add_argument("--host", default=os.environ.get("HOST") or ("0.0.0.0" if hosted() else "127.0.0.1"))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or 8000))
     a = ap.parse_args(argv)
     if not WEB_DIST.exists():
         print("The front end is not built yet: in the web folder run  npm install  then  npm run build. "

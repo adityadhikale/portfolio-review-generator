@@ -119,6 +119,19 @@ class ResearchCache:
                              encoding="utf-8")
 
 
+def searched_note(per, day: str, why: str) -> str:
+    """The AI Searched cell: 'Q2FY27 · 23/11/2026 · Q2 FY27 results not found yet'."""
+    return " · ".join([per.compact, day, why])
+
+
+def _searched_recently(cell, per, retry_days: float):
+    """(day, why) when the AI Searched cell says this period was searched less than retry_days ago, else None."""
+    parts = [p.strip() for p in str(cell or "").split("·")]
+    if len(parts) < 2 or parts[0].replace(" ", "").upper() != per.compact.upper():
+        return None
+    return (parts[1], parts[2] if len(parts) > 2 else "") if _days_since(parts[1]) < retry_days else None
+
+
 def _days_since(ddmmyyyy: str) -> float:
     try:
         return (datetime.now() - datetime.strptime(ddmmyyyy, "%d/%m/%Y")).days
@@ -336,8 +349,18 @@ def research(*, matched, per, settings, env, cache_path: Path, budget: int, post
                         _apply(m.uni, f, c[f], c, per, out)
                 need -= {"result", "commentary"}
             elif c.get("status") in ("awaited", "rejected") and _days_since(c.get("searched_at")) < retry_days:
-                out.skipped.append((m.holding.raw_symbol, f"asked on {c.get('searched_at')}: {c.get('reason') or c.get('status')}"
+                why = c.get("reason") or c.get("status")
+                out.skipped.append((m.holding.raw_symbol, f"asked on {c.get('searched_at')}: {why}"
                                     f"; asked again after {retry_days:g} day(s)"))
+                need -= {"result", "commentary"}
+                note = searched_note(per, c.get("searched_at"), why)
+                if str(m.uni.values.get("ai_searched") or "").strip() != note:
+                    m.uni.ai_searched_new = note            # the sheet keeps it too (a host forgets this file)
+        if need & {"result", "commentary"}:
+            seen_at = _searched_recently(m.uni.values.get("ai_searched"), per, retry_days)
+            if seen_at:                                     # remembered in the Universal Sheet
+                out.skipped.append((m.holding.raw_symbol, f"asked on {seen_at[0]}: {seen_at[1] or 'not usable'}; "
+                                    f"asked again after {retry_days:g} day(s)"))
                 need -= {"result", "commentary"}
         if need:
             todo.append((m, need))
@@ -458,6 +481,7 @@ def _take(m, need, a, extracts, grounding, web, model, per, canon_sector, cache,
         why = "no source links"
     if why:
         cache.put(u.key, {**entry, "status": "awaited" if status == "not_published" else "rejected", "reason": why})
+        u.ai_searched_new = searched_note(per, today, why)
         out.skipped.append((sym, why))
         return
     entry.update(status="found", sources=sources)
@@ -490,18 +514,21 @@ def _take(m, need, a, extracts, grounding, web, model, per, canon_sector, cache,
             _apply(u, "commentary", cm, entry, per, out)
     if not entry.get("result") and not entry.get("commentary"):
         entry.update(status="rejected", reason="nothing usable in the answer")
+        u.ai_searched_new = searched_note(per, today, entry["reason"])
+    elif str(u.values.get("ai_searched") or "").strip():
+        u.ai_searched_new = ""                              # found now: clear the earlier "searched" note
     cache.put(u.key, entry)
 
 
 # --------------------------------------------------------------------------- Universal Sheet
 def write_back(res_notes: list, uni, matched, per) -> int:
     """Write AI-filled cells (this run's answers and saved ones the sheet does not have yet) to the Google Sheet,
-    with Data Source and Data Updated. Returns the number of stock rows written."""
+    with Data Source and Data Updated, and the AI Searched note of stocks whose results were searched but are not
+    out yet. Returns the number of stock rows written."""
     rows = {}
     for m in matched:
         u = m.uni
-        f = getattr(u, "ai_written", set())
-        if f and u.row not in rows:
+        if (getattr(u, "ai_written", set()) or getattr(u, "ai_searched_new", None) is not None) and u.row not in rows:
             rows[u.row] = u
     if not rows or uni.origin is None:
         return 0
@@ -519,27 +546,34 @@ def write_back(res_notes: list, uni, matched, per) -> int:
 
     updates, expect = {}, {}
     today = datetime.now().strftime("%d/%m/%Y")
+    filled = 0
     for r, u in rows.items():
         cells = {}
-        for f in u.ai_written:
+        written = getattr(u, "ai_written", set())
+        for f in written:
             cells[col(f, FIELD_NAMES[f], updates)] = u.values[f]
-        if "result" in u.ai_written:
+        if "result" in written:
             cells[col("result_period", "Q Result Period", updates)] = per.label
-        cells[col("data_source", "Data Source", updates)] = u.values["data_source"]
-        cells[col("data_updated", "Data Updated", updates)] = today
+        if written:
+            filled += 1
+            cells[col("data_source", "Data Source", updates)] = u.values["data_source"]
+            cells[col("data_updated", "Data Updated", updates)] = today
+        if getattr(u, "ai_searched_new", None) is not None:
+            cells[col("ai_searched", "AI Searched", updates)] = u.ai_searched_new
         updates[r] = cells
         expect[r] = (get_column_letter(ci["name"] + 1), u.values.get("name"))
     try:
-        written = [r for r in uni.origin.write(updates, expect) if r != uni.header_row]
+        done = [r for r in uni.origin.write(updates, expect) if r != uni.header_row]
         res_notes += [n for n in uni.origin.notes() if n not in res_notes]
-        if written:
-            res_notes.append(f"Saved AI-researched Sector / Result Line / Commentary for {len(written)} stock(s) into "
+        if done and filled:
+            res_notes.append(f"Saved AI-researched Sector / Result Line / Commentary for {filled} stock(s) into "
                              f"the Universal Sheet ({uni.source}), with Data Source and Data Updated")
-        return len(written)
+        return len(done)
     except ReadOnlySheet as e:
-        res_notes.append(f"AI-researched values for {len(rows)} stock(s) were not written into the Universal Sheet "
-                         f"({e}); they are kept in ai_research.json and written on the next run that reads the "
-                         "Google Sheet")
+        if filled:
+            res_notes.append(f"AI-researched values for {filled} stock(s) were not written into the Universal Sheet "
+                             f"({e}); they are kept in ai_research.json and written on the next run that reads the "
+                             "Google Sheet")
     except Exception as e:  # noqa: BLE001 - never lose a run over the write-back
         res_notes.append(f"WARN: could not write AI-researched values into the Universal Sheet ({e}); they are kept "
                          "in ai_research.json")
@@ -561,7 +595,23 @@ def ai_sourced(matched) -> list[dict]:
             continue
         parts = [p.strip() for p in str(tag).split("·")]
         for f in sorted(fields):
-            rows.append({"symbol": m.holding.raw_symbol, "field": FIELD_NAMES[f], "value": u.values.get(f) or "",
+            rows.append({"symbol": m.holding.raw_symbol, "name": u.values.get("name") or "",
+                         "field": FIELD_NAMES[f], "value": u.values.get(f) or "",
                          "new": f in getattr(u, "ai_written", set()), "period": parts[2] if len(parts) > 2 else "",
                          "sources": parts[4] if len(parts) > 4 else ""})
+    return rows
+
+
+def ai_rated(matched) -> list[dict]:
+    """Every Rating / Sentiment the AI gave among this run's holdings (this run's and ones saved earlier), with the
+    AI's one-line reason, for the Portfolio Excel's References sheet."""
+    rows, seen = [], set()
+    for m in matched:
+        u = m.uni
+        if u.key in seen or getattr(u, "rating_source", "") != "AI (Gemini)":
+            continue
+        seen.add(u.key)
+        rows.append({"symbol": m.holding.raw_symbol, "name": u.values.get("name") or "", "rating": u.rating or "",
+                     "sentiment": u.sentiment or "",
+                     "reason": getattr(u, "ai_rating_reason", "") or u.values.get("rating_reason") or ""})
     return rows
