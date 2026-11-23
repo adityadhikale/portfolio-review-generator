@@ -63,7 +63,9 @@ def libreoffice_found() -> bool:
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    """Now, with the server's UTC offset (e.g. 2026-11-23T08:13:22+00:00): a browser in another time zone (a
+    hosted server runs on UTC, staff on IST) then reads the same moment, so the run timer starts at 0:00."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def _safe_name(name: str) -> str:

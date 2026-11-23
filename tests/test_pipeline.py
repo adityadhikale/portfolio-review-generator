@@ -935,6 +935,11 @@ class WebAPI(unittest.TestCase):
         self.assertEqual([s["key"] for s in j["stages"]], ["sheet", "match", "research", "excel", "check"])
         done = self._wait(j["id"])
         self.assertEqual((done["status"], done["client"], done["period"]), ("done", "Acme", "Q2 FY27"))
+        # times carry the server's UTC offset, so a browser in another time zone reads the same moment (timer 0:00)
+        from datetime import datetime, timezone
+        started = datetime.fromisoformat(done["started"])
+        self.assertIsNotNone(started.tzinfo)
+        self.assertLess(abs((datetime.now(timezone.utc) - started).total_seconds()), 60)
         self.assertEqual(self.calls, ["portfolio"])
         f = self.c.get(f"/api/runs/{j['id']}/files/Acme Portfolio.xlsx")
         self.assertEqual((f.status_code, f.content), (200, b"xlsx-bytes"))
