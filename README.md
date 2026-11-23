@@ -111,22 +111,6 @@ python serve.py
 Open **http://localhost:8000**. `python serve.py --host 0.0.0.0` makes it reachable from other machines on the
 office network. There is no login: anyone who can open the address can run it.
 
-### Hosting
-
-The website can run on a free host with no LibreOffice (plan: `docs\Architecture_Plan.md`, Phase 6). The host
-has no `.env`; set these in its dashboard:
-
-| Setting | Value |
-|---|---|
-| `CREST_HOSTED` | `1`: the deck comes as PowerPoint only (staff use File > Save as PDF), and the missing LibreOffice is expected, not a warning. Every number is computed in Python; the Excel cross-check and the "text stays on the page" render check are skipped |
-| `UNIVERSAL_SHEET_ID`, `UNIVERSAL_WORKSHEET`, `NARRATIVE_*`, `TAVILY_API_KEY` | As in `.env` |
-| `GOOGLE_CREDENTIALS_JSON` | The whole contents of the service-account key file (no key file on the host) |
-| `CREST_DECK_TEMPLATE` | Path to the deck template uploaded to the host |
-| `PORT` | Set by the host; `serve.py` listens on it, on every address when `CREST_HOSTED=1` |
-
-The host forgets its disk on restart, so run history, `ai_research.json` and `ai_ratings.json` last only until
-then; download results when a run finishes. Values the AI wrote into the Universal Sheet are still reused.
-
 | Part | What it is |
 |---|---|
 | `crest/api.py` | FastAPI: upload, run queue (one run at a time), live progress (server-sent events), results, downloads, history; API docs at `/api/docs` |
@@ -137,6 +121,23 @@ then; download results when a run finishes. Values the AI wrote into the Univers
 **Front-end development:** with `python serve.py` running, `cd web` then `npm run dev` serves the front end at
 http://localhost:5173 with live reload, forwarding `/api` to the Python server. Node.js 20+ is needed only to build
 the front end.
+
+## Hosting
+
+The website can run on a server with no `.env` file and no LibreOffice (plan: `docs\Architecture_Plan.md`,
+Phase 6). Every setting is then read from environment variables.
+
+| Setting | Value |
+|---|---|
+| `CREST_HOSTED` | `1` on a server without LibreOffice: the deck comes as PowerPoint only (staff use File > Save as PDF), and the missing LibreOffice is expected, not a warning. Every number is computed in Python; the Excel cross-check and the "text stays on the page" render check are skipped. Leave it unset on a server with LibreOffice to keep the PDF |
+| `UNIVERSAL_SHEET_ID`, `UNIVERSAL_WORKSHEET`, `NARRATIVE_*`, `TAVILY_API_KEY` | As in `.env` |
+| `GOOGLE_CREDENTIALS_FILE` or `GOOGLE_CREDENTIALS_JSON` | The path to the service-account key file, or the key file's whole contents |
+| `CREST_DECK_TEMPLATE` | The path to the deck template (not in git). A `.b64` file (the template as base64 text, for hosts that take secret files as text) is decoded on first use |
+| `PORT`, `HOST` | The port to listen on; with `CREST_HOSTED=1`, `serve.py` listens on every address |
+
+A server that forgets its disk on restart keeps run history, `ai_research.json`, `ai_ratings.json` and saved
+narratives only until then; download results when a run finishes. Everything the AI wrote into the Universal Sheet
+(values, ratings, AI Searched) is still reused. **There is no login**: share the site's address only inside CREST.
 
 ## Requirements
 
@@ -400,8 +401,11 @@ the Rating Source / Rating Reason columns) and kept as a backup in `runs/<period
 for any client, reads them from there and sends no request for those stocks. A stock is rated again only when its
 result line or commentary changes. If the run could not write to the Google Sheet, the next one that can does. The narrative is
 saved in `runs/<period>/<client>/narrative.json` and reused. Edit the sheet or that file to correct anything;
-delete the narrative (or a stock's Rating Source) to have it written again. There are no automatic
-correction requests: if the narrative fails a check, the run names the field to edit. If a model is busy, gives
+delete the narrative (or a stock's Rating Source) to have it written again. Prices are live, so a re-run of the
+same client can show different weights and returns than the saved narrative quotes: if that narrative is exactly
+as the API wrote it (a fingerprint, `_ai_digest`, is saved with it), the run asks for a fresh one in its one
+request instead of stopping. A narrative CREST has edited is never replaced; if its figures no longer match, the
+run stops and names the fields to edit. There are no other correction requests. If a model is busy, gives
 no answer within 90 seconds, is over quota or not available for the key, the same request goes straight to the
 next model in the list; if all fail, the list is tried once more after 30 seconds. If no model answers, the Excel
 and deck are still built (narrative slides pending) and the next run asks again. Set `narrative_provider` and

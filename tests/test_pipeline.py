@@ -431,6 +431,15 @@ class GoogleSheetSource(unittest.TestCase):
         self.assertEqual(GoogleSheet("s", credentials_file=self.td / "k.json")._credentials(Creds)[0], "file")
         with self.assertRaises(PipelineError):
             GoogleSheet("s", credentials_json="not json")._credentials(Creds)
+        # the deck template pasted as base64 text (a host's secret files are text) is decoded to a .pptx
+        import base64
+        from crest import util
+        b64 = self.td / "Deck.pptx.b64"
+        b64.write_text(base64.b64encode(b"PK-fake-pptx" * 50).decode(), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"CREST_DECK_TEMPLATE": str(b64)}), \
+                mock.patch.object(util, "ROOT", self.td):
+            p = util.deck_template_path()
+        self.assertEqual((p.suffix, p.read_bytes()), (".pptx", b"PK-fake-pptx" * 50))
 
     def test_loading_read_again_once(self):
         loading = [self.ROWS[0], self.ROWS[1][:4] + ["Loading..."] + self.ROWS[1][5:], self.ROWS[2]]
@@ -1300,6 +1309,39 @@ class Narrative(unittest.TestCase):
             self.assertEqual(res.status, "FAILED")
             nums = {t for _, t in res.narrative["unverified_numbers"]}
             self.assertIn("8.78", nums)   # reference-deck weight, not this run's price set
+
+    @needs_samples
+    def test_stale_ai_narrative_is_written_again(self):
+        """A saved narrative Gemini wrote, left unedited, whose figures no longer match (prices moved): a fresh one
+        is asked for in the run's request instead of stopping. Once CREST edits the file it is never replaced."""
+        from crest.ai_research import Outcome
+        from crest.narrative import ai_digest, untouched_ai
+        ref = json.loads((FX / "narrative_reference.json").read_text(encoding="utf-8"))   # foreign figures (8.78)
+        env = {"NARRATIVE_PROVIDER": "gemini", "NARRATIVE_API_KEY": "test-key"}
+        for edited in (False, True):
+            with tempfile.TemporaryDirectory() as td:
+                saved = {"_note": "Written automatically by Gemini.", "_ai_digest": ai_digest(ref), **ref}
+                if edited:
+                    saved["slide2"] = dict(saved["slide2"], headline="Edited by CREST")
+                f = Path(td) / "narrative.json"
+                f.write_text(json.dumps(saved), encoding="utf-8")
+                self.assertEqual(untouched_ai(saved), not edited)
+                asked = []
+
+                def review(gc, narrative_input=None, to_rate=None):
+                    asked.append(narrative_input is not None)
+                    return {}, None, []
+                with mock.patch("crest.shared.load_env", return_value=env), \
+                        mock.patch("crest.shared.ai_research.research", return_value=Outcome()), \
+                        mock.patch("crest.step_deck.request_review", side_effect=review):
+                    res = run(**ARGS, runs_dir=td, narrative=f, render_png=False)
+                if edited:
+                    self.assertFalse(any(asked))                 # never replaced: the checks stop the run
+                    self.assertEqual(res.status, "FAILED")
+                else:
+                    self.assertEqual(asked, [True])              # one request, with the narrative input
+                    self.assertTrue(any("asked Gemini for a fresh narrative" in n for n in res.notes))
+                    self.assertNotEqual(res.status, "FAILED")
 
     @needs_samples
     def test_narrative_inserted_in_warn_mode(self):

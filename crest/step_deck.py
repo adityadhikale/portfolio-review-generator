@@ -12,7 +12,8 @@ from . import validate as V
 from .ai_review import request_review
 from .deck_fill import fill_deck
 from .excel_build import build_workbook
-from .narrative import SCHEMA, ManualProvider, blank_template, check_numbers, resolve_provider_name, style_issues
+from .narrative import (SCHEMA, ManualProvider, ai_digest, blank_template, check_numbers, resolve_provider_name,
+                        style_issues, untouched_ai)
 from .narrative_api import GeminiClient
 from .office import find_soffice
 from .qa import render, run_qa
@@ -55,7 +56,14 @@ def build_deck(ctx: Ctx, excel_vals: dict | None = None):
     # 7. narrative + Gemini. A saved narrative.json is always used as-is. Missing ratings and a missing narrative
     # are requested from Gemini together, in ONE request (none at all when nothing is missing).
     nar = ManualProvider(Path(narrative_path)).get(ni)
-    want_nar = nar is None and resolve_provider_name(settings["narrative_provider"], env) == "gemini"
+    use_gemini = resolve_provider_name(settings["narrative_provider"], env) == "gemini"
+    if use_gemini and untouched_ai(nar) and check_numbers(nar, ni, settings.get("narrative_allowed_numbers", [])):
+        # Gemini's own saved narrative, unedited, whose figures no longer match (prices moved since it was written):
+        # ask for a fresh one in this run's single request instead of stopping. An edited narrative is never replaced.
+        res.notes.append(f"The saved {Path(narrative_path).name} (written by Gemini, not edited since) quotes figures "
+                         "that changed since it was written (live prices) - asked Gemini for a fresh narrative")
+        nar = None
+    want_nar = nar is None and use_gemini
     res.info["narrative_provider"] = "saved narrative.json" if nar is not None else ("gemini" if want_nar else "none")
     res.info["gemini_requests"] = 0
     if ai_to_rate or want_nar:
@@ -97,12 +105,13 @@ def build_deck(ctx: Ctx, excel_vals: dict | None = None):
                              f"saved to {rating_cache.path} - review before sending")
         if gnar:
             nar = {"_note": "Written automatically by Gemini. Review and edit before sending; delete this file to "
-                            "have it written again.", **gnar}
+                            "have it written again. Left unedited, it is written again when the figures change.",
+                   "_ai_digest": ai_digest(gnar), **gnar}
             Path(narrative_path).parent.mkdir(parents=True, exist_ok=True)
             Path(narrative_path).write_text(json.dumps(nar, indent=2, ensure_ascii=False), encoding="utf-8")
             res.notes.append(f"WARN: narrative written by Gemini ({gc.model}) and saved to {narrative_path} - review it "
                              "before sending the deck")
-    elif nar is not None and resolve_provider_name(settings["narrative_provider"], env) == "gemini":
+    elif nar is not None and use_gemini:
         res.notes.append(f"Narrative: used the saved {Path(narrative_path).name} (delete it to have Gemini write a new one)")
     if ai_on:
         _write_back_to_sheet(res, uni, matched, rating_cache, per)

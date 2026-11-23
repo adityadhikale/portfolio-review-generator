@@ -89,6 +89,19 @@ class ManualProvider:
             raise PipelineError(f"narrative.json is not valid JSON: {exc}") from exc
 
 
+def ai_digest(narrative: dict) -> str:
+    """A fingerprint of the narrative's text (keys starting with '_' left out). Saved with a narrative Gemini wrote,
+    so a later run can tell whether anyone has edited the file since."""
+    import hashlib
+    body = {k: v for k, v in narrative.items() if not str(k).startswith("_")}
+    return hashlib.sha1(json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+
+
+def untouched_ai(narrative: dict | None) -> bool:
+    """True when the narrative is exactly as Gemini wrote it (not edited by CREST since)."""
+    return bool(narrative) and narrative.get("_ai_digest") == ai_digest(narrative)
+
+
 def resolve_provider_name(setting: str, env: dict) -> str:
     """'auto' -> 'gemini' when .env names Gemini and has a key, else 'manual'. Gemini's narrative is requested in
     the same single call as the ratings (crest/ai_review.py); ManualProvider always reads a saved narrative.json."""
@@ -155,7 +168,7 @@ def check_numbers(narrative: dict, narrative_input: dict, extra_allowed: list) -
                     flagged.append((path, t))
         elif isinstance(obj, dict):
             for k, v in obj.items():
-                if k != "symbol":
+                if k != "symbol" and not str(k).startswith("_"):      # '_note', '_ai_digest': not narrative text
                     walk(v, f"{path}.{k}" if path else k)
         elif isinstance(obj, list):
             for i, v in enumerate(obj):
@@ -194,7 +207,8 @@ def style_issues(narrative: dict) -> list:
                 issues.append(f"{path}: {len(obj)} chars, longer than the box allows (~{lim})")
         elif isinstance(obj, dict):
             for k, v in obj.items():
-                walk(v, f"{path}.{k}" if path else k)
+                if not str(k).startswith("_"):
+                    walk(v, f"{path}.{k}" if path else k)
         elif isinstance(obj, list):
             for i, v in enumerate(obj):
                 walk(v, f"{path}[{i}]")

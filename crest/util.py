@@ -54,11 +54,22 @@ def hosted() -> bool:
 
 
 def deck_template_path() -> Path:
-    """The deck template: CREST_DECK_TEMPLATE when set (the host keeps it outside the code), else templates\\."""
+    """The deck template: CREST_DECK_TEMPLATE when set (the host keeps it outside the code), else templates\\.
+    A '.b64' file holds the template as base64 text (a host's secret files are pasted as text); it is decoded once
+    to a .pptx next to the code."""
     p = str(load_env().get("CREST_DECK_TEMPLATE") or "").strip()
     if not p:
         return ROOT / "templates" / "Deck_-_template.pptx"
-    return Path(p) if Path(p).is_absolute() else ROOT / p
+    path = Path(p) if Path(p).is_absolute() else ROOT / p
+    if path.suffix.lower() != ".b64" or not path.exists():
+        return path
+    import base64
+    out = ROOT / "templates" / "_hosted_deck_template.pptx"
+    data = base64.b64decode("".join(path.read_text(encoding="utf-8").split()))
+    if not out.exists() or out.read_bytes() != data:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+    return out
 
 
 # --------------------------------------------------------------------------- symbols / names
